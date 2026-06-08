@@ -90,7 +90,7 @@ fn current_rss_mb() -> Option<u64> {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;
         for line in status.lines() {
             if let Some(kb) = line.strip_prefix("VmRSS:") {
-                let kb: u64 = kb.trim().split_whitespace().next()?.parse().ok()?;
+                let kb: u64 = kb.split_whitespace().next()?.parse().ok()?;
                 return Some(kb / 1024);
             }
         }
