@@ -1,0 +1,19 @@
+[package]
+name = "broker-schedule"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Delayed message scheduling (CP2)"
+
+[dependencies]
+broker-partition = { path = "../broker-partition" }
+broker-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+cron = { workspace = true }
+parking_lot = { workspace = true }

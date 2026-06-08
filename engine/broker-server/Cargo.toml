@@ -1,0 +1,46 @@
+[package]
+name = "broker-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BetterMQ broker binary"
+
+[[bin]]
+name = "bettermq"
+path = "src/main.rs"
+
+[features]
+default = []
+cloud = []
+
+[dependencies]
+rust-embed = "8"
+mime_guess = "2"
+axum = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+broker-api = { workspace = true }
+broker-cli = { workspace = true }
+broker-partition = { workspace = true, features = ["slate"] }
+broker-storage = { workspace = true, features = ["slate"] }
+broker-dispatch = { workspace = true }
+broker-schedule = { workspace = true }
+broker-raft-meta = { workspace = true }
+broker-local-auth = { workspace = true }
+broker-config = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }
+wiremock = "0.6"
+broker-dispatch = { workspace = true }
+broker-proto = { workspace = true }
+serde_json = { workspace = true }

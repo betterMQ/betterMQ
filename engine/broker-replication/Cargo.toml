@@ -1,0 +1,20 @@
+[package]
+name = "broker-replication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Inter-broker AppendEntries replication (CP7a)"
+
+[dependencies]
+broker-proto = { workspace = true }
+broker-raft-meta = { path = "../broker-raft-meta" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

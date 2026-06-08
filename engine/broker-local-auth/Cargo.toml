@@ -1,0 +1,19 @@
+[package]
+name = "broker-local-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local-mode panel password and one-time API token storage"
+
+[dependencies]
+argon2 = "0.5"
+rand = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,1513 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "BetterMQ API",
+    "description": "HTTP webhook broker — publish, queues, enqueue, flow control, cron, and DLQ. Authenticate with a panel-generated `sk_local_…` Bearer token.",
+    "version": "0.2.2",
+    "license": {
+      "name": "MIT OR Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Liveness (no auth)"
+    },
+    {
+      "name": "Publish",
+      "description": "1:1 direct webhook delivery"
+    },
+    {
+      "name": "Queues",
+      "description": "Named destinations"
+    },
+    {
+      "name": "Groups",
+      "description": "Fan-out to multiple webhook destinations"
+    },
+    {
+      "name": "Enqueue",
+      "description": "Queue jobs"
+    },
+    {
+      "name": "Flows",
+      "description": "Rate and parallelism profiles"
+    },
+    {
+      "name": "Schedules",
+      "description": "Cron and delayed jobs"
+    },
+    {
+      "name": "DLQ",
+      "description": "Dead letter queue"
+    },
+    {
+      "name": "Ops",
+      "description": "Readiness, metrics, blocked destinations"
+    },
+    {
+      "name": "Flow Runtime",
+      "description": "Live flow control (pause, pin, rate)"
+    },
+    {
+      "name": "Cluster",
+      "description": "Cluster status (self-host HA)"
+    },
+    {
+      "name": "Gateway",
+      "description": "Stateless batch ingest"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API token (`Authorization: Bearer sk_local_…`)"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "ok"
+          },
+          "version": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "integer"
+          }
+        }
+      },
+      "PublishBody": {
+        "type": "object",
+        "required": [
+          "url",
+          "secret",
+          "key"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "secret": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "body": {},
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9,
+            "default": 5
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "delay": {
+            "type": "integer",
+            "description": "Delay in milliseconds"
+          },
+          "max_retries": {
+            "type": "integer",
+            "default": 0
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE",
+              "HEAD"
+            ]
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "sign": {
+            "type": "boolean"
+          }
+        }
+      },
+      "EnqueueBody": {
+        "type": "object",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "queue_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "queue": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "body": {},
+          "priority": {
+            "type": "integer"
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "delay": {
+            "type": "integer"
+          },
+          "max_retries": {
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object"
+          },
+          "sign": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DeliveryRef": {
+        "type": "object",
+        "required": ["shard", "seq"],
+        "properties": {
+          "shard": { "type": "integer", "format": "uint32" },
+          "seq": { "type": "integer", "format": "uint64" }
+        }
+      },
+      "ScheduledInfo": {
+        "type": "object",
+        "required": ["schedule_id", "deliver_at_ms"],
+        "properties": {
+          "schedule_id": { "type": "string", "format": "uuid" },
+          "deliver_at_ms": { "type": "integer", "format": "int64" }
+        }
+      },
+      "AcceptResponse": {
+        "type": "object",
+        "required": ["queue", "duplicate"],
+        "properties": {
+          "message_id": { "type": "string", "format": "uuid" },
+          "queue": { "type": "string" },
+          "duplicate": { "type": "boolean" },
+          "delivery": { "$ref": "#/components/schemas/DeliveryRef" },
+          "scheduled": { "$ref": "#/components/schemas/ScheduledInfo" }
+        }
+      },
+      "BatchEnqueueResponse": {
+        "type": "object",
+        "required": ["accepted", "message_ids"],
+        "properties": {
+          "accepted": { "type": "integer" },
+          "message_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" }
+          }
+        }
+      },
+      "BatchPublishMessage": {
+        "type": "object",
+        "required": ["payload"],
+        "properties": {
+          "topic": { "type": "string", "description": "Queue name" },
+          "queue_id": { "type": "string", "format": "uuid" },
+          "routing_key": { "type": "string", "description": "Flow / grouping key" },
+          "payload": { "description": "JSON value or string" },
+          "payload_encoding": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "delay_ms": { "type": "integer", "description": "Delay in milliseconds" },
+          "priority": { "type": "integer", "minimum": 0, "maximum": 9 },
+          "flow_id": { "type": "string", "format": "uuid" },
+          "url": { "type": "string", "format": "uri", "description": "Direct publish URL" },
+          "secret": { "type": "string" },
+          "max_retries": { "type": "integer" },
+          "retry_backoff": { "$ref": "#/components/schemas/RetryBackoff" },
+          "method": { "type": "string" },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "sign": { "type": "boolean" }
+        }
+      },
+      "RetryBackoff": {
+        "type": "object",
+        "properties": {
+          "kind": { "type": "string", "enum": ["fixed", "exponential"], "default": "exponential" },
+          "initialMs": { "type": "integer", "default": 500 },
+          "maxMs": { "type": "integer", "default": 30000 },
+          "multiplier": { "type": "number", "default": 2 }
+        }
+      },
+      "FlowProfileResponse": {
+        "type": "object",
+        "required": ["flow_id", "key", "parallelism", "rate", "period_secs"],
+        "properties": {
+          "flow_id": { "type": "string", "format": "uuid" },
+          "key": { "type": "string" },
+          "parallelism": { "type": "integer" },
+          "rate": { "type": "integer" },
+          "period_secs": { "type": "integer" }
+        }
+      },
+      "FlowControlInfo": {
+        "type": "object",
+        "properties": {
+          "flow_key": { "type": "string" },
+          "endpoint_id": { "type": "string", "format": "uuid" },
+          "wait_list_size": { "type": "integer" },
+          "parallelism_max": { "type": "integer" },
+          "parallelism_count": { "type": "integer" },
+          "rate_max": { "type": "integer" },
+          "rate_count": { "type": "integer" },
+          "rate_period_secs": { "type": "integer" },
+          "rate_period_start_ms": { "type": "integer", "format": "int64" },
+          "paused": { "type": "boolean" },
+          "pinned_parallelism": { "type": "boolean" },
+          "pinned_rate": { "type": "boolean" }
+        }
+      },
+      "GlobalParallelismInfo": {
+        "type": "object",
+        "properties": {
+          "parallelism_max": { "type": ["integer", "null"] },
+          "parallelism_count": { "type": "integer" }
+        }
+      },
+      "CronResponse": {
+        "type": "object",
+        "required": ["cron_id", "schedule_type", "queue", "paused", "next_run_at_ms", "created_at_ms"],
+        "properties": {
+          "cron_id": { "type": "string", "format": "uuid" },
+          "schedule_type": { "type": "string", "enum": ["cron", "interval"] },
+          "cron": { "type": "string" },
+          "every_seconds": { "type": "integer" },
+          "queue": { "type": "string" },
+          "destination_url": { "type": "string" },
+          "paused": { "type": "boolean" },
+          "next_run_at_ms": { "type": "integer", "format": "int64" },
+          "created_at_ms": { "type": "integer", "format": "int64" },
+          "last_run_at_ms": { "type": ["integer", "null"], "format": "int64" }
+        }
+      },
+      "DelayedJobResponse": {
+        "type": "object",
+        "required": ["schedule_id", "queue", "key", "deliver_at_ms", "body"],
+        "properties": {
+          "schedule_id": { "type": "string", "format": "uuid" },
+          "queue": { "type": "string" },
+          "key": { "type": "string" },
+          "deliver_at_ms": { "type": "integer", "format": "int64" },
+          "body": { "type": "string" }
+        }
+      },
+      "DlqListResponse": {
+        "type": "object",
+        "required": ["queue", "dlq_topic", "messages"],
+        "properties": {
+          "queue": { "type": "string" },
+          "dlq_topic": { "type": "string" },
+          "messages": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/DlqMessage" }
+          }
+        }
+      },
+      "DlqMessage": {
+        "type": "object",
+        "required": ["message_id", "key", "body", "published_at_ms"],
+        "properties": {
+          "message_id": { "type": "string", "format": "uuid" },
+          "key": { "type": "string" },
+          "body": { "type": "string" },
+          "published_at_ms": { "type": "integer", "format": "int64" }
+        }
+      },
+      "GroupPublishResponse": {
+        "type": "object",
+        "required": ["group_id", "accepted", "deliveries"],
+        "properties": {
+          "group_id": { "type": "string", "format": "uuid" },
+          "accepted": { "type": "integer" },
+          "deliveries": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GroupDeliveryRef" }
+          }
+        }
+      },
+      "GroupDeliveryRef": {
+        "type": "object",
+        "required": ["member_id", "duplicate"],
+        "properties": {
+          "member_id": { "type": "string", "format": "uuid" },
+          "message_id": { "type": "string", "format": "uuid" },
+          "duplicate": { "type": "boolean" },
+          "shard": { "type": "integer" },
+          "seq": { "type": "integer" }
+        }
+      },
+      "CreateQueueBody": {
+        "type": "object",
+        "required": [
+          "queue",
+          "url",
+          "secret"
+        ],
+        "properties": {
+          "queue": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "secret": {
+            "type": "string"
+          }
+        }
+      },
+      "QueueRecord": {
+        "type": "object",
+        "properties": {
+          "queue_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "queue": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "GroupRecord": {
+        "type": "object",
+        "properties": {
+          "group_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "paused": { "type": "boolean" }
+        }
+      },
+      "GroupMemberRecord": {
+        "type": "object",
+        "properties": {
+          "member_id": { "type": "string", "format": "uuid" },
+          "group_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "url": { "type": "string" },
+          "paused": { "type": "boolean" },
+          "parallelism": { "type": "integer" },
+          "rate": { "type": "integer" },
+          "period_secs": { "type": "integer" },
+          "flow_key": { "type": "string" }
+        }
+      },
+      "CreateGroupBody": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+      },
+      "AddGroupMemberBody": {
+        "type": "object",
+        "required": ["name", "url", "secret"],
+        "properties": {
+          "name": { "type": "string" },
+          "url": { "type": "string", "format": "uri" },
+          "secret": { "type": "string" },
+          "parallelism": { "type": "integer", "minimum": 1 },
+          "rate": { "type": "integer" },
+          "period_secs": { "type": "integer" },
+          "flow_key": { "type": "string" }
+        }
+      },
+      "GroupPublishBody": {
+        "type": "object",
+        "required": ["body"],
+        "properties": {
+          "key": { "type": "string" },
+          "body": {},
+          "idempotency_key": { "type": "string" },
+          "priority": { "type": "integer" }
+        }
+      },
+      "CreateFlowBody": {
+        "type": "object",
+        "required": [
+          "key",
+          "parallelism",
+          "rate",
+          "period_secs"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "parallelism": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "rate": {
+            "type": "integer"
+          },
+          "period_secs": {
+            "type": "integer"
+          }
+        }
+      },
+      "ReadyResponse": {
+        "type": "object",
+        "properties": {
+          "ready": { "type": "boolean" },
+          "cluster_healthy": { "type": "boolean" },
+          "auth_configured": { "type": "boolean" }
+        }
+      },
+      "MetricsResponse": {
+        "type": "object",
+        "properties": {
+          "blocked_hosts": { "type": "integer" },
+          "memory_critical": { "type": "boolean" },
+          "cluster_enabled": { "type": "boolean" },
+          "healthy_peers": { "type": "integer" }
+        }
+      },
+      "BlockedHostsResponse": {
+        "type": "object",
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "host": { "type": "string" },
+                "remaining_ms": { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "UnblockHostRequest": {
+        "type": "object",
+        "required": ["host"],
+        "properties": {
+          "host": { "type": "string" }
+        }
+      },
+      "BatchEnqueueRequest": {
+        "type": "object",
+        "required": ["messages"],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/BatchPublishMessage" }
+          }
+        }
+      },
+      "CreateCronBody": {
+        "type": "object",
+        "required": [
+          "key",
+          "body"
+        ],
+        "properties": {
+          "cron": {
+            "type": "string",
+            "description": "5-field cron (UTC)"
+          },
+          "every_seconds": {
+            "type": "integer"
+          },
+          "queue": {
+            "type": "string"
+          },
+          "queue_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "type": "string"
+          },
+          "body": {},
+          "priority": {
+            "type": "integer"
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["Health"],
+        "operationId": "healthz",
+        "summary": "Liveness (process up)",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": ["Ops"],
+        "operationId": "readyz",
+        "summary": "Readiness (auth + cluster quorum)",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Ready",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ReadyResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "Not ready",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ReadyResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["Ops"],
+        "operationId": "metrics",
+        "summary": "Basic JSON metrics",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MetricsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/publish": {
+      "post": {
+        "tags": [
+          "Publish"
+        ],
+        "operationId": "publish",
+        "summary": "Publish (1:1 webhook)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Duplicate idempotency key",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AcceptResponse" }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AcceptResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/publish/{destination}": {
+      "get": {
+        "tags": ["Publish"],
+        "operationId": "publishGet",
+        "summary": "Publish via GET (destination in path)",
+        "description": "Axum matches `{*destination}` — multi-segment URL-encoded paths are supported.",
+        "parameters": [
+          {
+            "name": "destination",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "URL-encoded destination URL (may contain slashes)"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted"
+          }
+        }
+      }
+    },
+    "/v1/enqueue": {
+      "post": {
+        "tags": [
+          "Enqueue"
+        ],
+        "operationId": "enqueue",
+        "summary": "Enqueue by queue name or id",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnqueueBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Duplicate idempotency key",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AcceptResponse" }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AcceptResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/queues/{queue_id}/enqueue": {
+      "post": {
+        "tags": [
+          "Enqueue"
+        ],
+        "operationId": "enqueueToQueue",
+        "summary": "Enqueue to queue by ID",
+        "parameters": [
+          {
+            "name": "queue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnqueueBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Duplicate idempotency key",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AcceptResponse" }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AcceptResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/queues": {
+      "get": {
+        "tags": [
+          "Queues"
+        ],
+        "operationId": "listQueues",
+        "summary": "List queues",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "queues": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/QueueRecord"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Queues"
+        ],
+        "operationId": "createQueue",
+        "summary": "Create or update queue",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateQueueBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          }
+        }
+      }
+    },
+    "/v1/queues/{queue_id}": {
+      "delete": {
+        "tags": [
+          "Queues"
+        ],
+        "operationId": "deleteQueue",
+        "summary": "Delete queue",
+        "parameters": [
+          {
+            "name": "queue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/QueueRecord" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/endpoints": {
+      "get": {
+        "tags": ["Queues"],
+        "operationId": "listEndpoints",
+        "summary": "List queues (legacy alias)",
+        "deprecated": true,
+        "responses": { "200": { "description": "OK" } }
+      },
+      "post": {
+        "tags": ["Queues"],
+        "operationId": "createEndpoint",
+        "summary": "Create queue (legacy alias)",
+        "deprecated": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateQueueBody" }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
+    "/v1/endpoints/{endpoint_id}": {
+      "delete": {
+        "tags": ["Queues"],
+        "operationId": "deleteEndpoint",
+        "summary": "Delete queue (legacy alias)",
+        "deprecated": true,
+        "parameters": [
+          {
+            "name": "endpoint_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": { "200": { "description": "Deleted" } }
+      }
+    },
+    "/v1/flows": {
+      "get": {
+        "tags": [
+          "Flows"
+        ],
+        "operationId": "listFlows",
+        "summary": "List flow profiles",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Flows"
+        ],
+        "operationId": "createFlow",
+        "summary": "Create flow profile",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateFlowBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          }
+        }
+      }
+    },
+    "/v1/flows/{flow_id}": {
+      "delete": {
+        "tags": [
+          "Flows"
+        ],
+        "operationId": "deleteFlow",
+        "summary": "Delete flow profile",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Deleted" }
+        }
+      }
+    },
+    "/v1/flow/{key}": {
+      "get": {
+        "tags": ["Flow Runtime"],
+        "operationId": "getFlow",
+        "summary": "Flow control state for a grouping key",
+        "parameters": [
+          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "queue_id", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "flow_id", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "group_member_id", "in": "query", "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FlowControlInfo" }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["Flow Runtime"],
+        "operationId": "upsertFlowControl",
+        "summary": "Upsert flow profile and create lane",
+        "parameters": [
+          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "queue_id", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "flow_id", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "group_member_id", "in": "query", "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateFlowBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FlowProfileResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/flow/{key}/pause": {
+      "post": {
+        "tags": ["Flow Runtime"],
+        "operationId": "pauseFlow",
+        "parameters": [
+          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "204": { "description": "Paused" } }
+      }
+    },
+    "/v1/flow/{key}/resume": {
+      "post": {
+        "tags": ["Flow Runtime"],
+        "operationId": "resumeFlow",
+        "parameters": [
+          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "204": { "description": "Resumed" } }
+      }
+    },
+    "/v1/flow/{key}/reset-rate": {
+      "post": {
+        "tags": ["Flow Runtime"],
+        "operationId": "resetFlowRate",
+        "parameters": [
+          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "204": { "description": "Rate reset" } }
+      }
+    },
+    "/v1/flow/{key}/pin": {
+      "post": {
+        "tags": ["Flow Runtime"],
+        "operationId": "pinFlow",
+        "parameters": [
+          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "204": { "description": "Pinned" } }
+      }
+    },
+    "/v1/flow/{key}/unpin": {
+      "post": {
+        "tags": ["Flow Runtime"],
+        "operationId": "unpinFlow",
+        "parameters": [
+          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "204": { "description": "Unpinned" } }
+      }
+    },
+    "/v1/flow/global": {
+      "get": {
+        "tags": ["Flow Runtime"],
+        "operationId": "globalFlow",
+        "summary": "Global parallelism info",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GlobalParallelismInfo" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/crons": {
+      "get": {
+        "tags": [
+          "Schedules"
+        ],
+        "operationId": "listCrons",
+        "summary": "List cron schedules",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Schedules"
+        ],
+        "operationId": "createCron",
+        "summary": "Create cron or interval schedule",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCronBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          }
+        }
+      }
+    },
+    "/v1/crons/{cron_id}": {
+      "get": {
+        "tags": [
+          "Schedules"
+        ],
+        "operationId": "getCron",
+        "parameters": [
+          {
+            "name": "cron_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Schedules"
+        ],
+        "operationId": "deleteCron",
+        "parameters": [
+          {
+            "name": "cron_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Deleted" }
+        }
+      }
+    },
+    "/v1/crons/{cron_id}/pause": {
+      "post": {
+        "tags": ["Schedules"],
+        "operationId": "pauseCron",
+        "parameters": [
+          { "name": "cron_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paused",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/crons/{cron_id}/resume": {
+      "post": {
+        "tags": ["Schedules"],
+        "operationId": "resumeCron",
+        "parameters": [
+          { "name": "cron_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resumed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/delayed": {
+      "get": {
+        "tags": [
+          "Schedules"
+        ],
+        "operationId": "listDelayed",
+        "summary": "List delayed jobs",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/v1/delayed/{schedule_id}": {
+      "delete": {
+        "tags": [
+          "Schedules"
+        ],
+        "operationId": "cancelDelayed",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DelayedJobResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dlq": {
+      "get": {
+        "tags": [
+          "DLQ"
+        ],
+        "operationId": "listDlq",
+        "summary": "List DLQ messages",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DlqListResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/enqueue/batch": {
+      "post": {
+        "tags": ["Enqueue"],
+        "operationId": "batchEnqueue",
+        "summary": "Batch enqueue (max 100 messages)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/BatchEnqueueRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BatchEnqueueResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/gateway/enqueue": {
+      "post": {
+        "tags": ["Gateway"],
+        "operationId": "gatewayEnqueue",
+        "summary": "Stateless gateway batch ingest (forwards to shard leaders)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/BatchEnqueueRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BatchEnqueueResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/groups": {
+      "get": {
+        "tags": ["Groups"],
+        "operationId": "listGroups",
+        "summary": "List fan-out groups",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "groups": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/GroupRecord" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["Groups"],
+        "operationId": "createGroup",
+        "summary": "Create group",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateGroupBody" }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
+    "/v1/groups/{group_id}": {
+      "get": {
+        "tags": ["Groups"],
+        "operationId": "getGroup",
+        "summary": "Get group with members",
+        "parameters": [
+          { "name": "group_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      },
+      "delete": {
+        "tags": ["Groups"],
+        "operationId": "deleteGroup",
+        "summary": "Delete group and members",
+        "parameters": [
+          { "name": "group_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Deleted" } }
+      }
+    },
+    "/v1/groups/{group_id}/members": {
+      "get": {
+        "tags": ["Groups"],
+        "operationId": "listGroupMembers",
+        "summary": "List group members",
+        "parameters": [
+          { "name": "group_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      },
+      "post": {
+        "tags": ["Groups"],
+        "operationId": "addGroupMember",
+        "summary": "Add member destination",
+        "parameters": [
+          { "name": "group_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AddGroupMemberBody" }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
+    "/v1/groups/{group_id}/members/{member_id}": {
+      "put": {
+        "tags": ["Groups"],
+        "operationId": "updateGroupMember",
+        "summary": "Update member",
+        "parameters": [
+          { "name": "group_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "member_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      },
+      "delete": {
+        "tags": ["Groups"],
+        "operationId": "deleteGroupMember",
+        "summary": "Remove member",
+        "parameters": [
+          { "name": "group_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "member_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Deleted" } }
+      }
+    },
+    "/v1/groups/{group_id}/publish": {
+      "post": {
+        "tags": ["Groups"],
+        "operationId": "publishGroup",
+        "summary": "Fan-out publish to all active members",
+        "parameters": [
+          { "name": "group_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/GroupPublishBody" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GroupPublishResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster": {
+      "get": {
+        "tags": ["Cluster"],
+        "operationId": "getClusterStatus",
+        "summary": "Cluster health and shard leadership",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/v1/destinations/blocked": {
+      "get": {
+        "tags": ["Ops"],
+        "operationId": "listBlockedHosts",
+        "summary": "List hosts blocked by the delivery circuit breaker",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BlockedHostsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/destinations/unblock": {
+      "post": {
+        "tags": ["Ops"],
+        "operationId": "unblockHost",
+        "summary": "Operator override — unblock a host",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UnblockHostRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Unblocked" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "engine/broker-proto",
+    "engine/broker-storage",
+    "engine/broker-partition",
+    "engine/broker-replication",
+    "engine/broker-raft-meta",
+    "engine/broker-dispatch",
+    "engine/broker-schedule",
+    "engine/broker-api",
+    "engine/broker-cli",
+    "engine/broker-server",
+    "engine/broker-payload",
+    "engine/broker-local-auth",
+    "engine/broker-config",
+]
+default-members = ["engine/broker-server"]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hackerrahul/bettermq"
+rust-version = "1.88"
+
+[workspace.dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+bincode = "1.3"
+crc32fast = "1.4"
+rocksdb = { version = "0.22", default-features = false }
+uuid = { version = "1", features = ["v4", "serde"] }
+parking_lot = "0.12"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+broker-proto = { path = "engine/broker-proto" }
+broker-storage = { path = "engine/broker-storage" }
+broker-partition = { path = "engine/broker-partition" }
+broker-replication = { path = "engine/broker-replication" }
+broker-raft-meta = { path = "engine/broker-raft-meta" }
+broker-dispatch = { path = "engine/broker-dispatch" }
+broker-schedule = { path = "engine/broker-schedule" }
+broker-api = { path = "engine/broker-api" }
+broker-cli = { path = "engine/broker-cli" }
+broker-payload = { path = "engine/broker-payload" }
+broker-local-auth = { path = "engine/broker-local-auth" }
+broker-config = { path = "engine/broker-config" }

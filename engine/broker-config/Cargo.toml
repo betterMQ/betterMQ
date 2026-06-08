@@ -1,0 +1,18 @@
+[package]
+name = "broker-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BetterMQ JSON configuration (self-host + cloud)"
+
+[features]
+default = []
+cloud = []
+
+[dependencies]
+broker-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+broker-raft-meta = { workspace = true }

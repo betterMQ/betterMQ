@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BetterMQ</title>
+  <script>
+    (function () {
+      var m = location.pathname.match(/^(.*\/panel)\/?/);
+      if (m) {
+        var base = document.createElement("base");
+        base.href = m[1] + "/";
+        document.head.appendChild(base);
+      }
+    })();
+  </script>
+  <script>
+    (() => {
+      try {
+        const stored = localStorage.getItem("themeMode");
+        const dark = stored ? stored === "dark" : true;
+        document.documentElement.classList.toggle("dark", dark);
+      } catch (_) {
+        document.documentElement.classList.add("dark");
+      }
+      document.addEventListener("basecoat:theme", (event) => {
+        const mode = event.detail?.mode;
+        const dark =
+          mode === "dark"
+            ? true
+            : mode === "light"
+              ? false
+              : !document.documentElement.classList.contains("dark");
+        document.documentElement.classList.toggle("dark", dark);
+        try {
+          localStorage.setItem("themeMode", dark ? "dark" : "light");
+        } catch (_) {}
+      });
+    })();
+  </script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/basecoat-css@0.3.11/dist/basecoat.cdn.min.css" />
+  <link rel="stylesheet" href="theme.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/basecoat-css@0.3.11/dist/js/basecoat.min.js" defer></script>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="app-sidebar">
+      <div class="app-sidebar-brand">
+        <div class="brand-mark" aria-hidden="true">SB</div>
+        <div>
+          <h1>BetterMQ</h1>
+          <span>Webhook broker</span>
+        </div>
+      </div>
+
+      <div class="app-sidebar-section">
+        <div class="app-sidebar-label">Queues</div>
+        <ul id="sidebarQueues"><li class="app-sidebar-empty">Loading…</li></ul>
+      </div>
+
+      <div class="app-sidebar-section" style="flex:1">
+        <div class="app-sidebar-label">Views</div>
+        <ul id="mainNav">
+          <li><button type="button" class="active" data-panel="panel-dashboard"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>Overview</button></li>
+          <li id="navInfra"><button type="button" data-panel="panel-infra"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/></svg>Infrastructure</button></li>
+          <li><button type="button" data-panel="panel-queues"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>Queues</button></li>
+          <li><button type="button" data-panel="panel-groups"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="7" r="3"/><circle cx="17" cy="7" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4"/><path d="M13 15a4 4 0 0 1 4-4h3"/></svg>Groups</button></li>
+          <li><button type="button" data-panel="panel-publish"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z"/></svg>Publish</button></li>
+          <li><button type="button" data-panel="panel-enqueue"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Enqueue</button></li>
+          <li><button type="button" data-panel="panel-flows"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14h6v6M20 10h-6V4"/><path d="M14 10l7-7M3 21l7-7"/></svg>Flows</button></li>
+          <li><button type="button" data-panel="panel-schedules"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>Schedules</button></li>
+          <li><button type="button" data-panel="panel-dlq"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21 16-4 4-4-4"/><path d="M17 20V4M3 8l4-4 4 4"/><path d="M7 4v16"/></svg>DLQ</button></li>
+          <li><button type="button" data-panel="panel-http"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>HTTP</button></li>
+          <li><button type="button" data-panel="panel-docs"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/><path d="M8 7h6M8 11h8"/></svg>Docs</button></li>
+          <li id="navSettings" class="hidden"><button type="button" data-panel="panel-settings"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>Settings</button></li>
+        </ul>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <div id="clusterAuthBanner" class="cluster-auth-banner hidden" role="alert">
+        <strong>Split auth across brokers.</strong>
+        This API URL hits multiple nodes with different local auth. Use one broker for dev, or
+        complete panel setup on each cluster node so each has its own API token.
+        <button type="button" id="btnDismissAuthBanner" class="btn-sm btn-ghost">Dismiss</button>
+      </div>
+
+      <header class="topbar">
+        <div id="healthPill" class="health-pill health-checking" title="Broker reachability">
+          <span class="health-dot" aria-hidden="true"></span>
+          <span id="healthLabel" class="health-label">Checking</span>
+        </div>
+        <div id="clusterPill" class="cluster-pill hidden" title="Cluster nodes">
+          <span id="clusterPillLabel" class="cluster-pill-label">—</span>
+        </div>
+
+        <div class="topbar-fields">
+          <label class="input-chip">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+            <input type="url" id="apiBase" class="sb-input-inline mono" placeholder="API URL" spellcheck="false" />
+          </label>
+          <label class="input-chip">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a15.07 15.07 0 0 1-4.24 4.24L3 21l-1 1 2-2 9.39-9.39a15.07 15.07 0 0 0 4.24-4.24L21 2z"/></svg>
+            <input type="password" id="apiToken" class="sb-input-inline mono" placeholder="Bearer token" autocomplete="off" />
+          </label>
+        </div>
+
+        <div class="topbar-tools">
+          <button type="button" id="btnRefreshAll" class="tool-btn" title="Refresh all">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+          </button>
+          <button type="button" class="tool-btn" aria-label="Toggle theme" title="Theme" onclick="document.dispatchEvent(new CustomEvent('basecoat:theme'))">
+            <span class="show-in-dark"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2"/></svg></span>
+            <span class="show-in-light"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></span>
+          </button>
+        </div>
+      </header>
+
+      <main class="content">
+        <!-- Overview -->
+        <section class="view-panel" id="panel-dashboard">
+          <div class="page-head">
+            <h2>Overview</h2>
+            <p>Broker health and resource counts · last refresh on load</p>
+          </div>
+
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <p class="kpi-label">Status</p>
+              <p id="dashHealth" class="kpi-value">…</p>
+              <p id="dashHealthSub" class="kpi-sub">Checking</p>
+              <p id="dashVersion" class="kpi-sub mono" style="margin-top:0.5rem"></p>
+            </div>
+            <div class="kpi-card">
+              <p class="kpi-label">Queues</p>
+              <p id="dashQueues" class="kpi-value">—</p>
+              <p id="dashQueuesSub" class="kpi-sub"></p>
+            </div>
+            <div class="kpi-card">
+              <p class="kpi-label">Flows</p>
+              <p id="dashFlows" class="kpi-value">—</p>
+              <p id="dashFlowsSub" class="kpi-sub"></p>
+            </div>
+            <div class="kpi-card">
+              <p class="kpi-label">Schedules</p>
+              <p id="dashSchedules" class="kpi-value">—</p>
+              <p id="dashSchedulesSub" class="kpi-sub"></p>
+            </div>
+            <div class="kpi-card" id="dashClusterCard">
+              <p class="kpi-label">Cluster</p>
+              <p id="dashCluster" class="kpi-value">—</p>
+              <p id="dashClusterSub" class="kpi-sub">Single node</p>
+            </div>
+          </div>
+
+          <div class="card hidden" id="clusterDetailCard">
+            <header>
+              <h2>Cluster topology</h2>
+              <p id="clusterDetailSub">Nodes, health, and shard ownership. <strong>Home</strong> = on preferred node; <strong>Claimed</strong> = failover active.</p>
+            </header>
+            <section>
+              <div class="cluster-summary-grid" id="clusterSummaryGrid"></div>
+              <div class="table-wrap" style="margin-top:1rem">
+                <table class="data-table" id="clusterNodesTable">
+                  <thead>
+                    <tr>
+                      <th>Node</th>
+                      <th>Health</th>
+                      <th>Role</th>
+                      <th>Led shards</th>
+                      <th>Preferred shards</th>
+                    </tr>
+                  </thead>
+                  <tbody id="clusterNodesBody">
+                    <tr><td colspan="5" class="text-muted">Loading…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="table-wrap" style="margin-top:1rem">
+                <table class="data-table cluster-shards-table" id="clusterShardsTable">
+                  <thead>
+                    <tr>
+                      <th>Shard</th>
+                      <th>Acting leader</th>
+                      <th>Home node</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="clusterShardsBody">
+                    <tr><td colspan="4" class="text-muted">Loading…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div class="dash-split">
+            <div class="card">
+              <header>
+                <h2>Delivery model</h2>
+                <p>How messages leave BetterMQ</p>
+              </header>
+              <section class="prose-sm">
+                <p><strong>Publish</strong> — immediate 1:1 webhook unless <code>flow_id</code> is set.</p>
+                <p><strong>Enqueue</strong> — FIFO per queue + routing key.</p>
+                <p><strong>Flows</strong> — rate limits via <code>POST /v1/flows</code>.</p>
+                <p class="text-xs" style="margin-top:0.75rem">Standalone: set password in <strong>Settings</strong> for your <code>sk_local_…</code> token.</p>
+              </section>
+            </div>
+            <div class="card">
+              <header>
+                <h2>Quick publish</h2>
+                <p>One direct webhook from the console</p>
+              </header>
+              <section>
+                <form class="form form-grid" onsubmit="return false">
+                  <div class="sb-field">
+                    <label for="dashPubUrl">URL</label>
+                    <input id="dashPubUrl" type="url" value="https://webhook.site" class="sb-input mono text-xs" />
+                  </div>
+                  <div class="sb-field">
+                    <label for="dashPubSecret">Secret</label>
+                    <input id="dashPubSecret" value="whsec_demo" class="sb-input mono" />
+                  </div>
+                  <div class="sb-field">
+                    <label for="dashPubBody">Body</label>
+                    <input id="dashPubBody" value='{"from":"dashboard"}' class="sb-input mono text-xs" />
+                  </div>
+                </form>
+              </section>
+              <footer>
+                <button type="button" id="btnDashPublish" class="btn btn-primary">Publish</button>
+              </footer>
+            </div>
+          </div>
+        </section>
+
+        <!-- Queues -->
+        <section class="view-panel panel-stack" id="panel-queues" hidden>
+          <div class="page-head">
+            <h2>Queues</h2>
+            <p><code class="mono text-xs">POST /v1/queues</code></p>
+          </div>
+          <div class="card">
+            <header><h2>Create queue</h2></header>
+            <section>
+              <form class="form form-grid form-grid-3" onsubmit="return false">
+                <div class="sb-field"><label for="epQueue">Name</label><input class="sb-input" id="epQueue" value="jobs" /></div>
+                <div class="sb-field span-2"><label for="epUrl">Webhook URL</label><input id="epUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
+                <div class="sb-field"><label for="epSecret">HMAC secret</label><input id="epSecret" value="whsec_demo" class="sb-input mono" /></div>
+                <div class="sb-field"><label for="epMaxRetries">Default max retries</label><input class="sb-input" id="epMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = one attempt only</p></div>
+                <div id="epRetryBackoffFields" class="span-3 form-grid form-grid-3 hidden" style="grid-column:1/-1">
+                  <div class="sb-field"><label for="epRetryKind">Backoff</label><select id="epRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
+                  <div class="sb-field"><label for="epRetryInitialMs">Delay (ms)</label><input class="sb-input" id="epRetryInitialMs" type="number" value="500" min="1" /></div>
+                  <div class="sb-field ep-retry-exp"><label for="epRetryMaxMs">Max delay (ms)</label><input class="sb-input" id="epRetryMaxMs" type="number" value="30000" min="1" /></div>
+                  <div class="sb-field ep-retry-exp"><label for="epRetryMultiplier">Multiplier</label><input class="sb-input" id="epRetryMultiplier" type="number" value="2" min="1" step="0.1" /></div>
+                </div>
+              </form>
+            </section>
+            <footer><button type="button" id="btnCreateEndpoint" class="btn btn-primary">Create</button></footer>
+          </div>
+          <div class="card">
+            <header><h2>Registered</h2></header>
+            <section class="table-wrap">
+              <table class="table">
+                <thead><tr><th>ID</th><th>Name</th><th>URL</th><th></th></tr></thead>
+                <tbody id="endpointsBody"></tbody>
+              </table>
+            </section>
+          </div>
+        </section>
+
+        <!-- Groups -->
+        <section class="view-panel panel-stack" id="panel-groups" hidden>
+          <div class="page-head">
+            <h2>Groups</h2>
+            <p><code class="mono text-xs">POST /v1/groups/{id}/publish</code> — fan-out to multiple webhook destinations</p>
+          </div>
+          <div class="card prose-sm" style="margin-bottom:0.75rem">
+            <p><strong>Groups</strong> deliver one payload to every active member. Each member has its own URL, secret, and rate / parallelism limits.</p>
+          </div>
+          <div class="card">
+            <header><h2>Create group</h2></header>
+            <section>
+              <form class="form form-grid form-grid-2" onsubmit="return false">
+                <div class="sb-field"><label for="grpName">Name</label><input class="sb-input" id="grpName" value="alerts" /></div>
+              </form>
+            </section>
+            <footer><button type="button" id="btnCreateGroup" class="btn btn-primary">Create</button></footer>
+          </div>
+          <div class="card">
+            <header><h2>Registered</h2></header>
+            <section class="table-wrap">
+              <table class="table">
+                <thead><tr><th>ID</th><th>Name</th><th></th></tr></thead>
+                <tbody id="groupsBody"></tbody>
+              </table>
+            </section>
+          </div>
+          <div class="card">
+            <header><h2>Members</h2></header>
+            <section>
+              <form class="form form-grid form-grid-3" onsubmit="return false">
+                <div class="sb-field span-3"><label for="grpMemberGroup">Group</label><select id="grpMemberGroup" class="sb-select"><option value="">— select group —</option></select></div>
+                <div class="sb-field"><label for="grpMemberName">Name</label><input class="sb-input" id="grpMemberName" value="primary" /></div>
+                <div class="sb-field span-2"><label for="grpMemberUrl">Webhook URL</label><input id="grpMemberUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
+                <div class="sb-field"><label for="grpMemberSecret">Secret</label><input id="grpMemberSecret" value="whsec_demo" class="sb-input mono" /></div>
+                <div class="sb-field"><label for="grpMemberParallelism">Parallelism</label><input class="sb-input" id="grpMemberParallelism" type="number" value="1" min="1" /></div>
+                <div class="sb-field"><label for="grpMemberRate">Rate / period</label><input class="sb-input" id="grpMemberRate" type="number" value="0" min="0" /><p class="field-hint">0 = unlimited</p></div>
+                <div class="sb-field"><label for="grpMemberPeriod">Period (s)</label><input class="sb-input" id="grpMemberPeriod" type="number" value="60" min="1" /></div>
+              </form>
+            </section>
+            <footer><button type="button" id="btnAddGroupMember" class="btn btn-primary">Add member</button></footer>
+            <section class="table-wrap" style="margin-top:1rem">
+              <table class="table">
+                <thead><tr><th>ID</th><th>Name</th><th>URL</th><th>Limits</th><th></th></tr></thead>
+                <tbody id="groupMembersBody"></tbody>
+              </table>
+            </section>
+          </div>
+          <div class="card">
+            <header><h2>Test publish</h2></header>
+            <section>
+              <form class="form form-grid form-grid-2" onsubmit="return false">
+                <div class="sb-field span-2"><label for="grpPubGroup">Group</label><select id="grpPubGroup" class="sb-select"><option value="">— select group —</option></select></div>
+                <div class="sb-field"><label for="grpPubKey">Key</label><input class="sb-input" id="grpPubKey" value="user-1" /></div>
+                <div class="sb-field span-2"><label for="grpPubBody">Body (JSON)</label><textarea id="grpPubBody" rows="3" class="sb-textarea mono text-xs">{"hello":"group"}</textarea></div>
+              </form>
+            </section>
+            <footer><button type="button" id="btnGroupPublish" class="btn btn-primary">Publish</button></footer>
+          </div>
+        </section>
+
+        <!-- Publish -->
+        <section class="view-panel" id="panel-publish" hidden>
+          <div class="page-head">
+            <h2>Publish</h2>
+            <p><code class="mono text-xs">POST /v1/publish</code> — one-off webhook delivery. No queue.</p>
+          </div>
+          <div class="card prose-sm" style="margin-bottom:0.75rem">
+            <p><strong>1:1 publish</strong> — URL + secret only. Immediate push, no rate limits.</p>
+            <p><strong>With flow profile</strong> — set <code>flow_id</code> to apply parallelism / rate limits (create under <strong>Flows</strong> first). Routing key should match the flow key.</p>
+          </div>
+          <div class="card">
+            <section>
+              <form class="form form-grid form-grid-2" onsubmit="return false">
+                <div class="sb-field span-2"><label for="pubUrl">Destination URL</label><input id="pubUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
+                <div class="sb-field"><label for="pubSecret">Secret</label><input id="pubSecret" value="whsec_demo" class="sb-input mono" /></div>
+                <div class="sb-field"><label for="pubKey">Routing key</label><input class="sb-input" id="pubKey" value="user-1" /><p class="field-hint">Must match flow key when using a profile</p></div>
+                <div class="sb-field"><label for="pubPriority">Priority (0–9)</label><input class="sb-input" id="pubPriority" type="number" value="5" min="0" max="9" /></div>
+                <div class="sb-field"><label for="pubMaxRetries">Max retries</label><input class="sb-input" id="pubMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = one attempt only</p></div>
+                <div class="sb-field"><label for="pubDelay">Delay (ms)</label><input class="sb-input" id="pubDelay" type="number" placeholder="immediate" /></div>
+                <div id="pubRetryBackoffFields" class="span-2 form-grid form-grid-2 hidden" style="grid-column:1/-1">
+                  <div class="sb-field"><label for="pubRetryKind">Backoff</label><select id="pubRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
+                  <div class="sb-field"><label for="pubRetryInitialMs">Delay (ms)</label><input class="sb-input" id="pubRetryInitialMs" type="number" value="500" min="1" /></div>
+                  <div class="sb-field pub-retry-exp"><label for="pubRetryMaxMs">Max delay (ms)</label><input class="sb-input" id="pubRetryMaxMs" type="number" value="30000" min="1" /></div>
+                  <div class="sb-field pub-retry-exp"><label for="pubRetryMultiplier">Multiplier</label><input class="sb-input" id="pubRetryMultiplier" type="number" value="2" min="1" step="0.1" /></div>
+                </div>
+                <div class="sb-field"><label for="pubIdempotency">Idempotency</label><input class="sb-input" id="pubIdempotency" /></div>
+                <div class="sb-field"><label for="pubFlowId">Flow profile (optional)</label><input id="pubFlowId" class="sb-input mono text-xs" placeholder="flow_id from Flows page" /></div>
+                <div class="sb-field span-2"><label for="pubBody">Body (JSON)</label><textarea id="pubBody" rows="4" class="sb-textarea mono text-xs">{"hello":"direct"}</textarea></div>
+              </form>
+            </section>
+            <footer><button type="button" id="btnPublish" class="btn btn-primary">Publish</button></footer>
+          </div>
+        </section>
+
+        <!-- Enqueue -->
+        <section class="view-panel" id="panel-enqueue" hidden>
+          <div class="page-head">
+            <h2>Enqueue</h2>
+            <p><code class="mono text-xs">POST /v1/queues/{id}/enqueue</code> — FIFO delivery to a registered queue</p>
+          </div>
+          <div class="card prose-sm" style="margin-bottom:0.75rem">
+            <p><strong>Queues</strong> — pick a queue created under <strong>Queues</strong>. Messages go to that queue’s webhook URL with built-in FIFO ordering.</p>
+            <p>For rate limits on one-off URLs, use <strong>Publish</strong> with a flow profile instead.</p>
+          </div>
+          <div class="card">
+            <section>
+              <form class="form form-grid form-grid-2" onsubmit="return false">
+                <div class="sb-field span-2"><label for="enqQueueId">Queue</label><select id="enqQueueId" class="sb-select"><option value="">— create a queue first —</option></select></div>
+                <div class="sb-field"><label for="enqKey">Key</label><input class="sb-input" id="enqKey" value="user-1" /></div>
+                <div class="sb-field"><label for="enqPriority">Priority</label><input class="sb-input" id="enqPriority" type="number" value="5" /></div>
+                <div class="sb-field"><label for="enqMaxRetries">Max retries</label><input class="sb-input" id="enqMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = one attempt only</p></div>
+                <div class="sb-field"><label for="enqDelay">Delay (ms)</label><input class="sb-input" id="enqDelay" type="number" /></div>
+                <div id="enqRetryBackoffFields" class="span-2 form-grid form-grid-2 hidden" style="grid-column:1/-1">
+                  <div class="sb-field"><label for="enqRetryKind">Backoff</label><select id="enqRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
+                  <div class="sb-field"><label for="enqRetryInitialMs">Delay (ms)</label><input class="sb-input" id="enqRetryInitialMs" type="number" value="500" min="1" /></div>
+                  <div class="sb-field enq-retry-exp"><label for="enqRetryMaxMs">Max delay (ms)</label><input class="sb-input" id="enqRetryMaxMs" type="number" value="30000" min="1" /></div>
+                  <div class="sb-field enq-retry-exp"><label for="enqRetryMultiplier">Multiplier</label><input class="sb-input" id="enqRetryMultiplier" type="number" value="2" min="1" step="0.1" /></div>
+                </div>
+                <div class="sb-field"><label for="enqIdempotency">Idempotency</label><input class="sb-input" id="enqIdempotency" /></div>
+                <div class="sb-field span-2"><label for="enqBody">Body</label><textarea id="enqBody" rows="4" class="sb-textarea mono text-xs">{"hello":"world"}</textarea></div>
+              </form>
+            </section>
+            <footer><button type="button" id="btnEnqueueNow" class="btn btn-primary">Enqueue</button></footer>
+          </div>
+        </section>
+
+        <!-- Flows -->
+        <section class="view-panel panel-stack" id="panel-flows" hidden>
+          <div class="page-head"><h2>Flows</h2><p>Rate + parallelism profiles for <strong>Publish</strong> (not queues)</p></div>
+          <div class="card">
+            <section>
+              <form class="form form-grid form-grid-4" onsubmit="return false">
+                <div class="sb-field"><label for="flowKey">Key</label><input class="sb-input" id="flowKey" value="user-1" /></div>
+                <div class="sb-field"><label for="flowParallelism">Parallelism</label><input class="sb-input" id="flowParallelism" type="number" value="1" min="1" /></div>
+                <div class="sb-field"><label for="flowRate">Rate</label><input class="sb-input" id="flowRate" type="number" value="100" /></div>
+                <div class="sb-field"><label for="flowPeriod">Period (sec)</label><input class="sb-input" id="flowPeriod" type="number" value="60" /></div>
+              </form>
+            </section>
+            <footer><button type="button" id="btnCreateFlow" class="btn btn-primary">Create profile</button></footer>
+          </div>
+          <div class="card">
+            <section class="table-wrap">
+              <table class="table">
+                <thead><tr><th>ID</th><th>Key</th><th>Par.</th><th>Rate</th><th>Period</th><th></th></tr></thead>
+                <tbody id="flowsBody"></tbody>
+              </table>
+            </section>
+          </div>
+        </section>
+
+        <!-- Schedules -->
+        <section class="view-panel panel-stack" id="panel-schedules" hidden>
+          <div class="page-head"><h2>Schedules</h2><p>Recurring jobs — direct webhook (like publish), not tied to a queue</p></div>
+          <div class="card">
+            <section>
+              <form class="form form-grid form-grid-2" onsubmit="return false">
+                <div class="sb-field">
+                  <label for="cronScheduleType">Type</label>
+                  <select id="cronScheduleType" class="sb-select">
+                    <option value="cron">Cron (UTC)</option>
+                    <option value="interval">Interval</option>
+                  </select>
+                </div>
+                <div class="sb-field"><label for="cronKey">Routing key</label><input class="sb-input" id="cronKey" value="cron-1" /></div>
+                <div class="sb-field span-2"><label for="cronUrl">Destination URL</label><input id="cronUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
+                <div class="sb-field"><label for="cronSecret">Secret</label><input id="cronSecret" value="whsec_demo" class="sb-input mono" /></div>
+                <div class="sb-field"><label for="cronPriority">Priority</label><input class="sb-input" id="cronPriority" type="number" value="5" /></div>
+                <div class="sb-field"><label for="cronMaxRetries">Max retries</label><input class="sb-input" id="cronMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = one attempt only</p></div>
+                <div class="sb-field" id="cronExprWrap"><label for="cronExpr">Cron</label><input id="cronExpr" value="*/1 * * * *" class="sb-input mono" /></div>
+                <div class="sb-field hidden" id="cronIntervalWrap"><label for="cronEverySeconds">Every (sec)</label><input class="sb-input" id="cronEverySeconds" type="number" value="10" /></div>
+                <div class="sb-field"><label for="cronFlowId">Flow profile (optional)</label><input id="cronFlowId" class="sb-input mono text-xs" placeholder="rate limits on publish" /></div>
+                <div id="cronRetryBackoffFields" class="span-2 form-grid form-grid-2 hidden" style="grid-column:1/-1">
+                  <div class="sb-field"><label for="cronRetryKind">Backoff</label><select id="cronRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
+                  <div class="sb-field"><label for="cronRetryInitialMs">Delay (ms)</label><input class="sb-input" id="cronRetryInitialMs" type="number" value="500" min="1" /></div>
+                  <div class="sb-field cron-retry-exp"><label for="cronRetryMaxMs">Max delay (ms)</label><input class="sb-input" id="cronRetryMaxMs" type="number" value="30000" min="1" /></div>
+                  <div class="sb-field cron-retry-exp"><label for="cronRetryMultiplier">Multiplier</label><input class="sb-input" id="cronRetryMultiplier" type="number" value="2" min="1" step="0.1" /></div>
+                </div>
+                <div class="sb-field span-2"><label for="cronBody">Body</label><textarea id="cronBody" rows="3" class="sb-textarea mono text-xs">{"tick":true}</textarea></div>
+              </form>
+            </section>
+            <footer><button type="button" id="btnCreateCron" class="btn btn-primary">Create schedule</button></footer>
+          </div>
+          <div class="card">
+            <section class="table-wrap">
+              <table class="table">
+                <thead><tr><th>Type</th><th>ID</th><th>Target</th><th>Spec</th><th>Status</th><th>Next</th><th></th></tr></thead>
+                <tbody id="jobsBody"></tbody>
+              </table>
+            </section>
+          </div>
+        </section>
+
+        <!-- DLQ -->
+        <section class="view-panel panel-stack" id="panel-dlq" hidden>
+          <div class="page-head"><h2>Dead letter queue</h2></div>
+          <div class="card">
+            <section>
+              <form class="form form-row" onsubmit="return false">
+                <div class="sb-field"><label for="dlqQueue">Queue</label><input class="sb-input" id="dlqQueue" value="jobs" /></div>
+                <div class="sb-field field-tight"><label for="dlqLimit">Limit</label><input class="sb-input" id="dlqLimit" type="number" value="20" /></div>
+                <button type="button" id="btnRefreshDlq" class="btn btn-outline">Load</button>
+              </form>
+            </section>
+          </div>
+          <div class="card">
+            <section class="table-wrap">
+              <table class="table">
+                <thead><tr><th>Message</th><th>Key</th><th>Published</th><th>Body</th></tr></thead>
+                <tbody id="dlqBody"></tbody>
+              </table>
+            </section>
+          </div>
+        </section>
+
+        <!-- HTTP -->
+        <section class="view-panel" id="panel-http" hidden>
+          <div class="page-head"><h2>HTTP defaults</h2><p>Applied to publish &amp; enqueue</p></div>
+          <div class="card">
+            <section>
+              <form class="form form-grid form-grid-2" onsubmit="return false">
+                <div class="sb-field">
+                  <label for="outMethod">Method</label>
+                  <select id="outMethod" class="sb-select">
+                    <option value="POST" selected>POST</option>
+                    <option value="GET">GET</option>
+                    <option value="PUT">PUT</option>
+                    <option value="PATCH">PATCH</option>
+                    <option value="DELETE">DELETE</option>
+                  </select>
+                </div>
+                <div class="checkbox-row">
+                  <input type="checkbox" id="outSign" />
+                  <label for="outSign">HMAC signature</label>
+                </div>
+                <div class="sb-field span-2">
+                  <label for="outHeaders">Headers (JSON)</label>
+                  <textarea id="outHeaders" rows="5" class="sb-textarea mono text-xs" placeholder='{"Authorization":"Bearer …"}'></textarea>
+                </div>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section class="view-panel panel-stack" id="panel-infra" hidden>
+          <div class="page-head">
+            <h2>Infrastructure</h2>
+            <p>Nodes, storage, and cluster — managed from the panel, no config files</p>
+          </div>
+
+          <div id="infraRestartBanner" class="cluster-auth-banner hidden" role="status">
+            <strong>Restart required.</strong>
+            <span id="infraRestartMsg">Apply saved changes by restarting this broker process.</span>
+          </div>
+
+          <div class="infra-kpi-row">
+            <div class="infra-kpi">
+              <div class="infra-kpi-label">This node</div>
+              <div class="infra-kpi-value" id="infraKpiNode">—</div>
+              <div class="infra-kpi-sub mono text-xs" id="infraKpiNodeUrl">—</div>
+            </div>
+            <div class="infra-kpi">
+              <div class="infra-kpi-label">Storage</div>
+              <div class="infra-kpi-value" id="infraKpiStorage">—</div>
+              <div class="infra-kpi-sub" id="infraStorageActive">Active: —</div>
+            </div>
+            <div class="infra-kpi">
+              <div class="infra-kpi-label">Cluster</div>
+              <div class="infra-kpi-value" id="infraKpiCluster">—</div>
+              <div class="infra-kpi-sub" id="infraClusterHint">Single node</div>
+            </div>
+            <div class="infra-kpi">
+              <div class="infra-kpi-label">Scheduler leader</div>
+              <div class="infra-kpi-value" id="infraKpiScheduler">—</div>
+              <div class="infra-kpi-sub" id="infraKpiSchedulerSub">—</div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom:1rem">
+            <header>
+              <h2>Nodes</h2>
+              <p id="infraNodesSub">Health and leadership across the cluster</p>
+            </header>
+            <section>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Node</th>
+                      <th>Health</th>
+                      <th>Roles</th>
+                      <th>Shard leader</th>
+                      <th>Preferred shards</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="infraNodesBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div class="infra-layout">
+            <div class="panel-stack" style="gap:1rem">
+              <div class="card">
+                <header>
+                  <h2>This node</h2>
+                  <p>How other brokers and clients reach this server</p>
+                </header>
+                <section class="form form-grid">
+                  <div class="sb-field">
+                    <label for="infraNodeName">Node name</label>
+                    <input id="infraNodeName" class="sb-input" placeholder="broker1" />
+                  </div>
+                  <div class="sb-field">
+                    <label for="infraPublicUrl">Public URL</label>
+                    <input id="infraPublicUrl" type="url" class="sb-input mono" placeholder="http://localhost:8080" />
+                  </div>
+                </section>
+                <footer>
+                  <button type="button" id="btnInfraSaveNode" class="btn btn-primary">Save node</button>
+                </footer>
+              </div>
+
+              <div class="card">
+                <header>
+                  <h2>Storage</h2>
+                  <p>WAL and message persistence backend</p>
+                </header>
+                <section class="form form-grid">
+                  <div class="sb-field">
+                    <label for="infraStorageMode">Mode</label>
+                    <select id="infraStorageMode" class="sb-input">
+                      <option value="local">Local disk (WAL + RocksDB)</option>
+                      <option value="slate">SlateDB (S3 / MinIO / R2)</option>
+                    </select>
+                  </div>
+                  <div id="infraS3Fields" class="infra-s3-grid hidden">
+                    <div class="sb-field">
+                      <label for="infraS3Endpoint">Endpoint</label>
+                      <input id="infraS3Endpoint" class="sb-input mono text-xs" placeholder="http://minio:9000" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="infraS3Bucket">Bucket</label>
+                      <input id="infraS3Bucket" class="sb-input mono" placeholder="bettermq" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="infraS3PayloadBucket">Payload bucket</label>
+                      <input id="infraS3PayloadBucket" class="sb-input mono" placeholder="bettermq-payloads" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="infraS3AccessKey">Access key</label>
+                      <input id="infraS3AccessKey" class="sb-input mono" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="infraS3SecretKey">Secret key</label>
+                      <input id="infraS3SecretKey" type="password" class="sb-input mono" placeholder="leave blank to keep" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="infraS3Region">Region</label>
+                      <input id="infraS3Region" class="sb-input mono" value="auto" />
+                    </div>
+                  </div>
+                </section>
+                <footer class="infra-footer">
+                  <button type="button" id="btnInfraTestS3" class="btn btn-outline">Test connection</button>
+                  <button type="button" id="btnInfraSaveStorage" class="btn btn-primary">Save storage</button>
+                  <span id="infraS3TestResult" class="text-xs muted"></span>
+                </footer>
+              </div>
+            </div>
+
+            <div class="card">
+              <header>
+                <h2>Cluster setup</h2>
+                <p id="infraClusterSetupHint">Turn this broker into a multi-node HA cluster</p>
+              </header>
+              <section>
+                <div id="infraCreateFlow">
+                  <p class="infra-section-title">Create a new cluster (seed node)</p>
+                  <div class="infra-steps">
+                    <div class="infra-step">
+                      <span class="infra-step-num">1</span>
+                      <div class="infra-step-body">
+                        <h3>Set this node’s public URL</h3>
+                        <p>Other servers must reach this broker at the URL above — save node settings first.</p>
+                      </div>
+                    </div>
+                    <div class="infra-step">
+                      <span class="infra-step-num">2</span>
+                      <div class="infra-step-body">
+                        <h3>Create cluster on this server</h3>
+                        <p>This node becomes the seed. You’ll get a join token valid for 24 hours.</p>
+                      </div>
+                    </div>
+                    <div class="infra-step">
+                      <span class="infra-step-num">3</span>
+                      <div class="infra-step-body">
+                        <h3>Add more nodes</h3>
+                        <p>On each new server, open this panel and use the join form below with the token.</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="infra-cluster-actions">
+                    <button type="button" id="btnInfraCreateCluster" class="btn btn-primary">Create cluster (this seed)</button>
+                    <button type="button" id="btnInfraSyncCluster" class="btn btn-outline" title="Usually automatic after join/remove">Re-sync now</button>
+                  </div>
+                  <div id="infraJoinTokenBox" class="infra-token-card hidden">
+                    <p class="text-sm" style="margin:0 0 0.5rem"><strong>Join token</strong> — share with new servers (expires in 24h)</p>
+                    <div class="token-box mono" id="infraJoinToken"></div>
+                    <p class="text-xs muted" id="infraSeedUrlHint" style="margin:0.5rem 0 0"></p>
+                  </div>
+                  <p id="infraJoinTokenActiveHint" class="text-xs muted hidden" style="margin-top:0.75rem">A join token is active on this seed. Create again if you need a new one.</p>
+                </div>
+
+                <div class="infra-join-panel">
+                  <p class="infra-section-title">Join an existing cluster (new server)</p>
+                  <p class="text-sm muted" style="margin:0 0 0.75rem">Run on a <strong>new</strong> broker (not the seed). The <strong>seed</strong> is the first broker that created the cluster — other nodes use its URL and join token to register.</p>
+                  <div class="form form-grid">
+                    <div class="sb-field">
+                      <label for="infraJoinSeed">Seed broker URL</label>
+                      <input id="infraJoinSeed" type="url" class="sb-input mono text-xs" placeholder="http://host.docker.internal:8080" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="infraJoinTokenInput">Join token</label>
+                      <input id="infraJoinTokenInput" class="sb-input mono" placeholder="from seed node" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="infraJoinNodeName">This node name</label>
+                      <input id="infraJoinNodeName" class="sb-input" placeholder="broker2" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="infraJoinPublicUrl">This public URL</label>
+                      <input id="infraJoinPublicUrl" type="url" class="sb-input mono text-xs" />
+                    </div>
+                  </div>
+                  <footer class="infra-footer" style="padding:0;margin-top:0.75rem">
+                    <button type="button" id="btnInfraTestSeed" class="btn btn-outline" title="Check this broker can reach the seed">Test seed connection</button>
+                    <button type="button" id="btnInfraJoinCluster" class="btn btn-primary">Join cluster</button>
+                  </footer>
+                </div>
+
+                <div id="infraShardsCard" class="hidden" style="margin-top:1.25rem">
+                  <p class="infra-section-title">Shard leadership</p>
+                  <div class="table-wrap">
+                    <table class="data-table cluster-shards-table">
+                      <thead>
+                        <tr>
+                          <th>Shard</th>
+                          <th>Acting leader</th>
+                          <th>Home node</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody id="infraShardsBody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section class="view-panel" id="panel-settings" hidden>
+          <div class="page-head">
+            <h2>Settings</h2>
+            <p>Local API token (standalone mode only)</p>
+          </div>
+          <div class="card">
+            <header>
+              <h2>Regenerate API token</h2>
+              <p>Enter your panel password. The new token is shown once — copy it immediately.</p>
+            </header>
+            <section>
+              <form class="form form-grid" onsubmit="return false" id="formRegenToken">
+                <div class="sb-field">
+                  <label for="regenPassword">Panel password</label>
+                  <input type="password" id="regenPassword" class="sb-input" autocomplete="current-password" />
+                </div>
+              </form>
+            </section>
+            <footer>
+              <button type="button" id="btnRegenToken" class="btn btn-primary">Regenerate token</button>
+            </footer>
+          </div>
+        </section>
+
+        <section class="view-panel view-panel-docs" id="panel-docs" hidden>
+          <div class="page-head page-head-compact">
+            <h2>API reference</h2>
+            <p>
+              OpenAPI 3.1 ·
+              <a id="docsOpenLink" href="#" target="_blank" rel="noopener">/docs</a> ·
+              <a id="openapiLink" href="#" target="_blank" rel="noopener">openapi.json</a>
+            </p>
+          </div>
+          <iframe id="docsFrame" class="docs-frame" title="BetterMQ API reference"></iframe>
+        </section>
+      </main>
+
+      <footer class="log-dock">
+        <div class="log-dock-inner">
+          <div class="log-dock-head">
+            <span>Activity</span>
+            <button type="button" id="btnClearLog" class="btn-sm btn-ghost">Clear</button>
+          </div>
+          <div id="log" class="mono"></div>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <div id="authSetup" class="auth-overlay hidden" role="dialog" aria-modal="true">
+    <div class="auth-card">
+      <h2>Secure this broker</h2>
+      <p class="muted text-sm">Choose a panel password. You will receive an API token once — store it safely.</p>
+      <form class="form form-grid" onsubmit="return false" id="formSetup">
+        <div class="sb-field">
+          <label for="setupPassword">Password</label>
+          <input type="password" id="setupPassword" class="sb-input" autocomplete="new-password" />
+        </div>
+        <div class="sb-field">
+          <label for="setupPassword2">Confirm password</label>
+          <input type="password" id="setupPassword2" class="sb-input" autocomplete="new-password" />
+        </div>
+      </form>
+      <p id="setupError" class="auth-error hidden"></p>
+      <button type="button" id="btnSetup" class="btn btn-primary" style="width:100%;margin-top:0.75rem">Create API token</button>
+    </div>
+  </div>
+
+  <div id="tokenReveal" class="auth-overlay hidden" role="dialog" aria-modal="true">
+    <div class="auth-card">
+      <h2>Copy your API token</h2>
+      <p class="muted text-sm">Shown once. It will not be displayed again. Regenerate from Settings with your password.</p>
+      <div class="token-box mono" id="tokenRevealValue"></div>
+      <button type="button" id="btnCopyToken" class="btn btn-outline" style="width:100%;margin-top:0.5rem">Copy</button>
+      <button type="button" id="btnTokenDone" class="btn btn-primary" style="width:100%;margin-top:0.5rem">I saved it — continue</button>
+    </div>
+  </div>
+
+  <div id="authGate" class="auth-overlay hidden">
+    <div class="auth-card">
+      <h2>API token required</h2>
+      <p class="muted text-sm">Paste your <code>sk_local_…</code> token, or regenerate one in Settings with your panel password.</p>
+      <div class="sb-field">
+        <label for="gateToken">API token</label>
+        <input type="password" id="gateToken" class="sb-input mono" placeholder="sk_local_…" autocomplete="off" />
+      </div>
+      <p id="gateError" class="auth-error hidden"></p>
+      <button type="button" id="btnGateSave" class="btn btn-primary" style="width:100%;margin-top:0.75rem">Continue</button>
+      <button type="button" id="btnGateSettings" class="btn btn-ghost" style="width:100%;margin-top:0.35rem">Open Settings</button>
+    </div>
+  </div>
+
+  <script src="panel-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

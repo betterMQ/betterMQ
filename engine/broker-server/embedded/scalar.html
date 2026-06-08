@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BetterMQ API Reference</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0a0a0a; }
+    #api-reference { height: 100%; min-height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="api-reference"></div>
+  <script type="application/json" id="bettermq-openapi-spec">__OPENAPI_SPEC__</script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.57.5"></script>
+  <script>
+    (function () {
+      const specEl = document.getElementById("bettermq-openapi-spec");
+      const content = specEl ? specEl.textContent : "";
+      if (!content || !content.trim()) {
+        document.getElementById("api-reference").innerHTML =
+          "<p style='color:#fafafa;padding:2rem;font-family:system-ui'>OpenAPI spec missing.</p>";
+        return;
+      }
+      Scalar.createApiReference("#api-reference", {
+        sources: [{ content: content, title: "BetterMQ API", default: true }],
+        theme: "none",
+        layout: "modern",
+        darkMode: true,
+        hideDownloadButton: false,
+        metaData: { title: "BetterMQ API" },
+      });
+    })();
+  </script>
+</body>
+</html>

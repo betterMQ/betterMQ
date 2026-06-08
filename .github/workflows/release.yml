@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver bump (from latest v* tag, or 0.1.0 if none)
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUMP="${{ inputs.bump }}"
+          LATEST="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          if [[ -z "$LATEST" ]]; then
+            BASE="0.1.0"
+          else
+            BASE="${LATEST#v}"
+          fi
+          IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            *) echo "Unknown bump: $BUMP"; exit 1 ;;
+          esac
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Bumping ${LATEST:-<none>} → ${TAG} (${BUMP})"
+
+      - name: Set workspace version
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          sed -i '/^\[workspace\.package\]/,/^\[/{ s/^version = ".*"/version = "'"${VERSION}"'"/; }' Cargo.toml
+          grep -A2 '^\[workspace.package\]' Cargo.toml
+
+      - name: Sync OpenAPI info.version
+        run: |
+          jq --arg v "${{ steps.bump.outputs.version }}" '.info.version = $v' \
+            engine/broker-server/openapi/bettermq.openapi.json > /tmp/openapi.json
+          mv /tmp/openapi.json engine/broker-server/openapi/bettermq.openapi.json
+
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml engine/broker-server/openapi/bettermq.openapi.json
+          git diff --staged --quiet && echo "Nothing to commit" && exit 0
+          git commit -m "chore(release): ${{ steps.bump.outputs.tag }}"
+          git tag "${{ steps.bump.outputs.tag }}"
+          git push origin HEAD:"${{ github.ref_name }}"
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+  build:
+    needs: bump
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: bettermq-linux-amd64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: bettermq-macos-arm64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            artifact: bettermq-macos-amd64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: bettermq-windows-amd64.exe
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build broker-server
+        run: cargo build -p broker-server --release --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp "target/${{ matrix.target }}/release/bettermq.exe" "dist/${{ matrix.artifact }}"
+          else
+            cp "target/${{ matrix.target }}/release/bettermq" "dist/${{ matrix.artifact }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  publish:
+    needs: [bump, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Zip artifacts
+        run: |
+          cd dist
+          for f in *; do
+            if [[ -f "$f" && "$f" != *.zip ]]; then
+              zip "${f}.zip" "$f"
+            fi
+          done
+          ls -la
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.bump.outputs.tag }}
+          name: BetterMQ ${{ needs.bump.outputs.version }}
+          generate_release_notes: true
+          files: dist/*.zip

@@ -1,0 +1,27 @@
+[package]
+name = "broker-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAL, segments, and RocksDB indexes"
+
+[features]
+default = []
+slate = ["dep:slatedb", "dep:object_store", "dep:tokio", "dep:bytes"]
+
+[dependencies]
+broker-proto = { workspace = true }
+bincode = { workspace = true }
+rocksdb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+bytes = { version = "1", optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread"] }
+slatedb = { version = "0.13", optional = true }
+object_store = { version = "0.12", optional = true, features = ["aws"] }
+
+[dev-dependencies]
+tempfile = "3"

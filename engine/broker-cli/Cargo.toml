@@ -1,0 +1,21 @@
+[package]
+name = "broker-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI: serve, dev, bench, cluster join"
+
+[features]
+default = []
+cloud = []
+
+[dependencies]
+clap = { workspace = true }
+uuid = { workspace = true }
+broker-raft-meta = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+broker-api = { workspace = true }
+broker-config = { workspace = true }
