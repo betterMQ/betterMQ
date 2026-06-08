@@ -2,6 +2,9 @@
 
 **Self-hosted HTTP message broker** — enqueue durable jobs, deliver them with signed webhook push. No workers to poll; your app receives HTTP callbacks.
 
+<img width="1774" height="887" alt="image" src="https://github.com/user-attachments/assets/118d11ae-da20-4acc-ba29-c9f04c6c466c" />
+
+
 [bettermq.com](https://bettermq.com) · [Interactive API docs](https://github.com/hackerrahul/BetterMQ) (`/docs` when running)
 
 ---
