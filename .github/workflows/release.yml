@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
