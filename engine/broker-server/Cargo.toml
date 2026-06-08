@@ -14,10 +14,6 @@ default = []
 
 [lints]
 workspace = true
-    "broker-api/cloud",
-    "broker-cli/cloud",
-    "broker-config/cloud",
-]
 
 [dependencies]
 rust-embed = "8"
