@@ -654,6 +654,30 @@ impl Broker {
         self.publish(req)
     }
 
+    /// DLQ partition directories present on disk (`jobs.__dlq`, `__direct.__dlq`, …).
+    pub fn list_dlq_topics_on_disk(&self) -> Result<Vec<String>, BrokerError> {
+        let tenant_dir = self
+            .inner
+            .config
+            .data_dir
+            .join("partitions")
+            .join(&self.inner.config.tenant_id);
+        let mut topics = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&tenant_dir) else {
+            return Ok(topics);
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if is_dlq_topic(&name) {
+                    topics.push(name);
+                }
+            }
+        }
+        topics.sort();
+        Ok(topics)
+    }
+
     /// Scan a topic from offset 0 (used for DLQ inspection; push-only broker).
     pub fn list_topic_messages(
         &self,
@@ -684,6 +708,21 @@ impl Broker {
         offset: u64,
     ) -> Result<bool, BrokerError> {
         if is_dlq_topic(topic) {
+            return Ok(false);
+        }
+        let removed =
+            self.with_partition_log(topic, partition, |log| Ok(log.purge_offset(offset)))?;
+        Ok(removed)
+    }
+
+    /// Remove a dead-letter record (operator cleanup from the panel / API).
+    pub fn purge_dlq_message(
+        &self,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Result<bool, BrokerError> {
+        if !is_dlq_topic(topic) {
             return Ok(false);
         }
         let removed =

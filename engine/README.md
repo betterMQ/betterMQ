@@ -1,22 +1,23 @@
 # BetterMQ engine
 
-Shared Rust crates used by both products:
+Shared Rust crates for the self-hosted webhook broker.
 
-| Product | Binary | Features |
-|---------|--------|----------|
-| **Self-host** | `../selfhost/` | `broker-server` default (local panel auth) |
-| **Cloud** | `../cloud/` | `broker-server` with `--features cloud` (Postgres) |
+| Area | Path |
+|------|------|
+| **Server binary** | `broker-server` (built from repo root) |
+| **Docker / compose** | [`../selfhost/`](../selfhost/) |
+| **Control panel** | `control-panel/` (embedded in broker) |
 
-Crates: `broker-proto`, `broker-storage`, `broker-partition`, `broker-dispatch`, `broker-schedule`, `broker-api`, `broker-server`, `broker-cli`, etc.
+Crates: `broker-proto`, `broker-storage`, `broker-partition`, `broker-dispatch`, `broker-schedule`, `broker-api`, `broker-server`, `broker-cli`, `broker-config`, etc.
 
-Build self-host from repo root:
+Build from repo root:
 
 ```bash
 cargo build --release -p broker-server
 ```
 
-Build cloud:
+Run locally:
 
 ```bash
-cargo build --release -p broker-server --features cloud
+cargo run -p broker-cli -- serve
 ```

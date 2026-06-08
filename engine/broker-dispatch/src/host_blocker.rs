@@ -98,6 +98,29 @@ impl HostBlocker {
         }
     }
 
+    /// Operator override — block a host immediately (URL or `scheme://host:port` key).
+    pub fn block_manual(&self, host: &str, duration_ms: u64) -> String {
+        let key = if host.contains("://") {
+            Self::host_key(host).unwrap_or_else(|| host.trim().to_string())
+        } else {
+            host.trim().to_string()
+        };
+        let wait = Duration::from_millis(duration_ms.max(1_000));
+        self.hosts
+            .lock()
+            .expect("host blocker lock")
+            .insert(
+                key.clone(),
+                HostState {
+                    failures: self.cfg.failures_before_block,
+                    blocked_until: Some(Instant::now() + wait),
+                    cooldown_ms: duration_ms,
+                },
+            );
+        tracing::warn!(host = %key, cooldown_ms = wait.as_millis(), "host manually blocked");
+        key
+    }
+
     pub fn unblock(&self, host: &str) -> bool {
         let key = if host.contains("://") {
             Self::host_key(host).unwrap_or_else(|| host.to_string())

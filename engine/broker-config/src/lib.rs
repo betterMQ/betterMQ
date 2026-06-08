@@ -1,4 +1,4 @@
-//! Typed `bettermq.json` configuration for self-host and cloud deployments.
+//! Typed `bettermq.json` configuration for self-hosted deployments.
 
 mod cluster;
 mod file;

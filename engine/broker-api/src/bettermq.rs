@@ -12,9 +12,9 @@ use axum::{
 };
 use broker_dispatch::{FlowControlInfo, GlobalParallelismInfo};
 use broker_partition::{
-    dlq_topic, BrokerError, CreateSubscriptionRequest, CreateSubscriptionResponse,
-    DestinationSnapshot, FlowSpec, PublishRequest, PublishResponse, ResolvedFlow, ScheduledInfo,
-    StoredMessage, Subscription, DIRECT_TOPIC,
+    dlq_topic, group_member_dlq_topic, is_dlq_topic, BrokerError, CreateSubscriptionRequest,
+    CreateSubscriptionResponse, DestinationSnapshot, FlowSpec, PublishRequest, PublishResponse,
+    ResolvedFlow, ScheduledInfo, StoredMessage, Subscription, DIRECT_TOPIC,
 };
 use broker_schedule::{
     CronError, CronJob, ScheduleError, ScheduledPublish, ScheduledPublishRequest,
@@ -32,13 +32,12 @@ pub fn bettermq_routes() -> Router<Arc<AppState>> {
         .route("/v1/publish", post(publish_job))
         .route("/v1/enqueue", post(enqueue))
         .route("/v1/queues/{queue_id}/enqueue", post(enqueue_to_queue))
-        .route("/v1/dlq", get(list_dlq))
+        .route("/v1/dlq", get(list_dlq).delete(delete_dlq_message))
+        .route("/v1/dlq/sources", get(list_dlq_sources))
         .route("/v1/flows", get(list_flows).post(create_flow))
         .route("/v1/flows/{flow_id}", delete(delete_flow))
         .route("/v1/queues", get(list_queues).post(create_queue))
         .route("/v1/queues/{queue_id}", delete(delete_queue))
-        .route("/v1/endpoints", get(list_endpoints).post(create_endpoint))
-        .route("/v1/endpoints/{endpoint_id}", delete(delete_endpoint))
         .route("/v1/delayed", get(list_delayed))
         .route("/v1/delayed/{schedule_id}", delete(cancel_delayed))
         .route("/v1/flow/{key}", get(get_flow).put(upsert_flow_control))
@@ -153,7 +152,12 @@ fn default_flow_period() -> u64 {
 
 #[derive(Debug, Deserialize)]
 pub struct DlqQuery {
-    pub queue: String,
+    /// Primary queue name (`jobs` → `jobs.__dlq`). Legacy param; use `dlq_topic` for direct/group DLQs.
+    #[serde(default)]
+    pub queue: Option<String>,
+    /// Full DLQ topic (`__direct.__dlq`, `__group.{id}.{member}.__dlq`, …).
+    #[serde(default)]
+    pub dlq_topic: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -171,13 +175,6 @@ pub struct CreateQueueRequest {
     pub secret: String,
     #[serde(flatten)]
     pub retry: RetryInput,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateEndpointRequest {
-    pub queue: String,
-    pub url: String,
-    pub secret: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +228,31 @@ pub struct DlqMessage {
     pub key: String,
     pub body: String,
     pub published_at_ms: i64,
+    pub partition: u32,
+    pub offset: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_queue: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteDlqQuery {
+    pub dlq_topic: String,
+    pub partition: u32,
+    pub offset: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DlqSourceResponse {
+    pub dlq_topic: String,
+    /// `queue` | `direct` | `group_member`
+    pub kind: String,
+    pub label: String,
+    pub count: usize,
+    /// Set when `kind` is `queue` — pass as `?queue=` to list messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,13 +274,6 @@ pub struct FlowProfileResponse {
 #[derive(Debug, Serialize)]
 pub struct FlowListResponse {
     pub flows: Vec<FlowProfileResponse>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct EndpointResponse {
-    pub endpoint_id: Uuid,
-    pub queue: String,
-    pub url: String,
 }
 
 fn default_limit() -> usize {
@@ -342,13 +357,123 @@ pub(crate) fn to_enqueue_response(inner: PublishResponse) -> EnqueueResponse {
     }
 }
 
+fn parse_dlq_payload(body: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return (None, None);
+    };
+    let source_queue = v
+        .get("source_queue")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let destination_url = v
+        .get("destination_url")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    (source_queue, destination_url)
+}
+
 fn to_dlq_message(msg: StoredMessage) -> DlqMessage {
+    let body = String::from_utf8_lossy(&msg.payload).into_owned();
+    let (source_queue, destination_url) = parse_dlq_payload(&body);
     DlqMessage {
         message_id: msg.id,
         key: msg.routing_key,
-        body: String::from_utf8_lossy(&msg.payload).into_owned(),
+        body,
         published_at_ms: msg.published_at_ms,
+        partition: msg.partition,
+        offset: msg.offset,
+        source_queue,
+        destination_url,
     }
+}
+
+fn resolve_dlq_topic(q: &DlqQuery) -> Result<String, ApiError> {
+    if let Some(topic) = &q.dlq_topic {
+        if !broker_partition::is_dlq_topic(topic) {
+            return Err(ApiError::BadRequest(format!(
+                "dlq_topic must end with .__dlq (got {topic})"
+            )));
+        }
+        return Ok(topic.clone());
+    }
+    if let Some(queue) = &q.queue {
+        if queue.is_empty() {
+            return Err(ApiError::BadRequest("queue must not be empty".into()));
+        }
+        return Ok(dlq_topic(queue));
+    }
+    Err(ApiError::BadRequest(
+        "provide queue or dlq_topic query parameter".into(),
+    ))
+}
+
+fn dlq_source_label(state: &AppState, dlq_topic_name: &str) -> (String, String, Option<String>) {
+    let direct = dlq_topic(DIRECT_TOPIC);
+    if dlq_topic_name == direct {
+        return (
+            "direct".into(),
+            "Direct publish".into(),
+            Some(DIRECT_TOPIC.into()),
+        );
+    }
+    if let Some(rest) = dlq_topic_name.strip_prefix("__group.") {
+        if let Some((ids, _)) = rest.split_once(".__dlq") {
+            let parts: Vec<&str> = ids.splitn(2, '.').collect();
+            if parts.len() == 2 {
+                if let (Ok(gid), Ok(mid)) = (Uuid::parse_str(parts[0]), Uuid::parse_str(parts[1]))
+                {
+                    let group_name = state
+                        .broker
+                        .get_group(gid)
+                        .ok()
+                        .flatten()
+                        .map(|g| g.name)
+                        .unwrap_or_else(|| gid.to_string());
+                    let member_name = state
+                        .broker
+                        .get_group_member(mid)
+                        .ok()
+                        .flatten()
+                        .map(|m| m.name)
+                        .unwrap_or_else(|| mid.to_string());
+                    return (
+                        "group_member".into(),
+                        format!("Group {group_name} → {member_name}"),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+    if let Some(queue) = dlq_topic_name.strip_suffix(".__dlq") {
+        return (
+            "queue".into(),
+            format!("Queue: {queue}"),
+            Some(queue.to_string()),
+        );
+    }
+    (
+        "other".into(),
+        dlq_topic_name.to_string(),
+        None,
+    )
+}
+
+fn collect_dlq_topic_candidates(state: &AppState) -> Result<Vec<String>, ApiError> {
+    let mut topics: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    topics.insert(dlq_topic(DIRECT_TOPIC));
+    for q in state.broker.list_endpoints()? {
+        topics.insert(dlq_topic(&q.topic));
+    }
+    for g in state.broker.list_groups()? {
+        for m in state.broker.list_group_members(g.id)? {
+            topics.insert(group_member_dlq_topic(g.id, m.id));
+        }
+    }
+    for t in state.broker.list_dlq_topics_on_disk()? {
+        topics.insert(t);
+    }
+    Ok(topics.into_iter().collect())
 }
 
 fn to_queue_response(inner: CreateSubscriptionResponse) -> QueueResponse {
@@ -427,14 +552,6 @@ async fn apply_inline_flow(
     Ok(())
 }
 
-fn to_endpoint_response(inner: CreateSubscriptionResponse) -> EndpointResponse {
-    EndpointResponse {
-        endpoint_id: inner.id,
-        queue: inner.topic,
-        url: inner.url,
-    }
-}
-
 async fn publish_job(
     State(state): State<Arc<AppState>>,
     ingest: Option<axum::extract::Extension<crate::metering::IngestAuth>>,
@@ -495,18 +612,66 @@ async fn list_dlq(
     State(state): State<Arc<AppState>>,
     Query(q): Query<DlqQuery>,
 ) -> Result<Json<DlqListResponse>, ApiError> {
-    let topic = dlq_topic(&q.queue);
+    let topic = resolve_dlq_topic(&q)?;
     let messages = state
         .broker
         .list_topic_messages(&topic, q.limit)?
         .into_iter()
         .map(to_dlq_message)
         .collect();
+    let queue_label = q
+        .queue
+        .clone()
+        .or_else(|| {
+            topic
+                .strip_suffix(".__dlq")
+                .filter(|s| !s.starts_with("__group."))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| topic.clone());
     Ok(Json(DlqListResponse {
-        queue: q.queue,
+        queue: queue_label,
         dlq_topic: topic,
         messages,
     }))
+}
+
+async fn delete_dlq_message(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DeleteDlqQuery>,
+) -> Result<StatusCode, ApiError> {
+    if !is_dlq_topic(&q.dlq_topic) {
+        return Err(ApiError::BadRequest("dlq_topic must end with .__dlq".into()));
+    }
+    let removed = state
+        .broker
+        .purge_dlq_message(&q.dlq_topic, q.partition, q.offset)
+        .map_err(ApiError::Broker)?;
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::BadRequest("DLQ message not found".into()))
+    }
+}
+
+async fn list_dlq_sources(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<DlqSourceResponse>>, ApiError> {
+    let topics = collect_dlq_topic_candidates(&state)?;
+    let mut sources = Vec::new();
+    for topic in topics {
+        let count = state.broker.list_topic_messages(&topic, 10_000)?.len();
+        let (kind, label, queue) = dlq_source_label(&state, &topic);
+        sources.push(DlqSourceResponse {
+            dlq_topic: topic,
+            kind,
+            label,
+            count,
+            queue,
+        });
+    }
+    sources.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
+    Ok(Json(sources))
 }
 
 async fn create_queue(
@@ -598,62 +763,21 @@ async fn delete_queue(
     State(state): State<Arc<AppState>>,
     Path(queue_id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<QueueResponse>), ApiError> {
-    delete_endpoint(State(state), Path(queue_id))
-        .await
-        .map(|(s, Json(e))| {
-            (
-                s,
-                Json(QueueResponse {
-                    queue_id: e.endpoint_id,
-                    queue: e.queue,
-                    url: e.url,
-                }),
-            )
-        })
-}
-
-async fn list_endpoints(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<EndpointListResponse>, ApiError> {
-    let endpoints = state
-        .broker
-        .list_endpoints()?
-        .into_iter()
-        .map(|s| {
-            to_endpoint_response(CreateSubscriptionResponse {
-                id: s.id,
-                topic: s.topic,
-                url: s.url,
-            })
-        })
-        .collect();
-    Ok(Json(EndpointListResponse { endpoints }))
-}
-
-async fn delete_endpoint(
-    State(state): State<Arc<AppState>>,
-    Path(endpoint_id): Path<Uuid>,
-) -> Result<(StatusCode, Json<EndpointResponse>), ApiError> {
-    let s = state.broker.delete_endpoint(endpoint_id)?;
-    crate::cluster::replicate_queue_delete(&state, endpoint_id).await;
+    let s = state.broker.delete_endpoint(queue_id)?;
+    crate::cluster::replicate_queue_delete(&state, queue_id).await;
     Ok((
         StatusCode::OK,
-        Json(to_endpoint_response(CreateSubscriptionResponse {
-            id: s.id,
-            topic: s.topic,
+        Json(QueueResponse {
+            queue_id: s.id,
+            queue: s.topic,
             url: s.url,
-        })),
+        }),
     ))
 }
 
 #[derive(Debug, Serialize)]
 pub struct QueueListResponse {
     pub queues: Vec<QueueResponse>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct EndpointListResponse {
-    pub endpoints: Vec<EndpointResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -729,24 +853,6 @@ impl IntoResponse for DelayedApiError {
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
     }
-}
-
-async fn create_endpoint(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateEndpointRequest>,
-) -> Result<(StatusCode, Json<EndpointResponse>), ApiError> {
-    let (status, Json(inner)) = create_subscription(
-        State(state),
-        Json(CreateSubscriptionRequest {
-            topic: req.queue,
-            url: req.url,
-            secret: req.secret,
-            default_max_retries: None,
-            retry_backoff: None,
-        }),
-    )
-    .await?;
-    Ok((status, Json(to_endpoint_response(inner))))
 }
 
 async fn get_flow(

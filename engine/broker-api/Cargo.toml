@@ -7,7 +7,9 @@ description = "HTTP API routes (Axum)"
 
 [features]
 default = []
-cloud = []
+
+[lints]
+workspace = true
 
 [dependencies]
 axum = { workspace = true }

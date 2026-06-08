@@ -61,3 +61,8 @@ broker-cli = { path = "engine/broker-cli" }
 broker-payload = { path = "engine/broker-payload" }
 broker-local-auth = { path = "engine/broker-local-auth" }
 broker-config = { path = "engine/broker-config" }
+
+# Public self-host builds omit the `cloud` Cargo feature; source still uses
+# `#[cfg(feature = "cloud")]` for the private tree. Tell check-cfg it is valid.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cloud"))'] }

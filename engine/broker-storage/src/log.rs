@@ -130,13 +130,15 @@ impl PartitionLog {
             let frame_start = byte_pos;
             match decode_frame(&mut reader) {
                 Ok((_header, _payload)) => {
-                    self.index.insert(
-                        next_offset,
-                        LogPosition {
-                            path: path.to_path_buf(),
-                            byte_offset: frame_start,
-                        },
-                    );
+                    if !self.meta.purged_offsets.contains(&next_offset) {
+                        self.index.insert(
+                            next_offset,
+                            LogPosition {
+                                path: path.to_path_buf(),
+                                byte_offset: frame_start,
+                            },
+                        );
+                    }
                     next_offset += 1;
                     byte_pos = reader.stream_position()?;
                 }
@@ -367,10 +369,23 @@ impl PartitionLog {
         self.meta.next_offset
     }
 
-    /// Remove a delivered message from the in-memory index after delivery.
-    /// Segment bytes are not rewritten; records are no longer readable via [`Self::read_range`].
+    /// Tombstone a record: drop from the index and persist the offset in [`LogMeta`].
+    /// WAL/segment bytes are not rewritten; [`Self::rebuild_from_disk`] skips purged offsets.
     pub fn purge_offset(&mut self, offset: u64) -> bool {
-        self.index.remove(&offset).is_some()
+        if self.meta.purged_offsets.contains(&offset) {
+            return false;
+        }
+        if offset >= self.meta.next_offset {
+            return false;
+        }
+        let removed = self.index.remove(&offset).is_some();
+        if removed {
+            self.meta.purged_offsets.insert(offset);
+            if let Err(e) = self.meta.save(&self.dir) {
+                tracing::warn!(error = %e, offset, "failed to persist purged offset");
+            }
+        }
+        removed
     }
 
     fn read_at(&self, pos: &LogPosition) -> Result<(LogRecord, Vec<u8>), LogError> {
@@ -456,6 +471,23 @@ mod tests {
         assert!(log.purge_offset(0));
         let msgs = log.read_range(0, 0, 10).unwrap();
         assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn purge_offset_survives_reopen() {
+        let dir = tempdir().unwrap();
+        {
+            let mut log = PartitionLog::open(dir.path(), PartitionLogConfig::default()).unwrap();
+            log.append(0, sample_record("t"), b"one".to_vec()).unwrap();
+            log.append(0, sample_record("t"), b"two".to_vec()).unwrap();
+            assert!(log.purge_offset(0));
+            log.sync().unwrap();
+        }
+        let log = PartitionLog::open(dir.path(), PartitionLogConfig::default()).unwrap();
+        let msgs = log.read_range(0, 0, 10).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].offset, 1);
+        assert_eq!(msgs[0].payload, b"two");
     }
 
     #[test]

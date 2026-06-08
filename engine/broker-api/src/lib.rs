@@ -93,6 +93,10 @@ pub fn router(state: AppState) -> Router {
         .merge(groups::group_routes())
         .route("/v1/destinations/blocked", get(ops::list_blocked_hosts))
         .route(
+            "/v1/destinations/block",
+            axum::routing::post(ops::block_host),
+        )
+        .route(
             "/v1/destinations/unblock",
             axum::routing::post(ops::unblock_host),
         )

@@ -1,4 +1,4 @@
-//! API-key auth: local panel token (self-host) or Postgres keys (cloud edition).
+//! API-key auth: local panel token for self-hosted brokers.
 
 use crate::routes::ApiError;
 use crate::AppState;

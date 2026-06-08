@@ -267,7 +267,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     #[cfg(not(feature = "cloud"))]
     let local_auth = match &settings.auth {
         ResolvedAuth::Cloud { .. } => {
-            anyhow::bail!("auth.mode cloud is not supported in this build")
+            anyhow::bail!("auth.mode \"cloud\" is not supported in the self-host build (use auth.mode \"local\")")
         }
         ResolvedAuth::Local { .. } => {
             let local = broker_local_auth::LocalAuthStore::open(&settings.data_dir)

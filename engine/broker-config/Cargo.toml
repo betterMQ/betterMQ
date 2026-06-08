@@ -3,11 +3,13 @@ name = "broker-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "BetterMQ JSON configuration (self-host + cloud)"
+description = "BetterMQ JSON configuration"
 
 [features]
 default = []
-cloud = []
+
+[lints]
+workspace = true
 
 [dependencies]
 broker-proto = { workspace = true }

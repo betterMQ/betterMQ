@@ -1,4 +1,4 @@
-//! Cloud ingest metering (CP3 / CP6).
+//! Ingest metering hooks (self-host: no-op stubs).
 
 use crate::AppState;
 #[cfg(feature = "cloud")]

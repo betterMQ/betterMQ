@@ -142,6 +142,10 @@ impl DispatchEngine {
         self.host_blocker.clone()
     }
 
+    pub fn memory_guard(&self) -> Arc<MemoryGuard> {
+        self.memory_guard.clone()
+    }
+
     /// Only dispatch/backfill partitions where this node is shard leader (CP7a).
     pub fn with_shard_leader_check(mut self, check: ShardLeaderFn) -> Self {
         self.is_shard_leader = Some(check);

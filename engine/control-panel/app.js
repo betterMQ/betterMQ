@@ -1,5 +1,8 @@
 (function () {
   const $log = $("#log");
+  const $logDock = $("#logDock");
+  const $logSummary = $("#logSummary");
+  let logEntryCount = 0;
   let queuesCache = [];
   let groupsCache = [];
   let groupMembersCache = [];
@@ -66,7 +69,8 @@
     appStarted = false;
     const t = loadSavedToken();
     $("#apiToken").val(t);
-    syncDocsUrls();
+    docsFrameBase = null;
+    syncDocsLinks();
     initAuth();
   });
 
@@ -117,12 +121,26 @@
     $("#clusterAuthBanner").addClass("hidden");
   });
 
-  function syncDocsUrls() {
+  let docsFrameBase = null;
+
+  function syncDocsLinks() {
     const base = apiBase();
     if (!base) return;
-    $("#docsFrame").attr("src", base + "/docs");
     $("#docsOpenLink").attr("href", base + "/docs");
     $("#openapiLink").attr("href", base + "/openapi.json");
+  }
+
+  /** Load Scalar only when Docs tab is open — avoids iframe layout glitches while hidden. */
+  function loadDocsFrame(force) {
+    const base = apiBase();
+    if (!base) return;
+    syncDocsLinks();
+    const src = base + "/docs";
+    const cur = $("#docsFrame").attr("src") || "";
+    if (force || docsFrameBase !== base || !cur) {
+      docsFrameBase = base;
+      $("#docsFrame").attr("src", src);
+    }
   }
 
   function setHealthStatus(state, meta) {
@@ -446,6 +464,45 @@
       headers: authHeaders(),
       timeout: 30000,
     });
+  }
+
+  function apiDeleteJSON(url) {
+    return $.ajax({
+      url: url,
+      method: "DELETE",
+      headers: authHeaders(),
+      timeout: 15000,
+    });
+  }
+
+  let modalCopyText = "";
+
+  function formatJsonBody(body) {
+    if (body === undefined || body === null) return "";
+    try {
+      const parsed = typeof body === "string" ? JSON.parse(body) : body;
+      return JSON.stringify(parsed, null, 2);
+    } catch (_e) {
+      return String(body);
+    }
+  }
+
+  function showJsonModal(title, body) {
+    modalCopyText = formatJsonBody(body);
+    $("#modalTitle").text(title || "Message body");
+    $("#modalJson").text(modalCopyText);
+    $("#modalBackdrop").removeClass("hidden");
+  }
+
+  function closeJsonModal() {
+    $("#modalBackdrop").addClass("hidden");
+  }
+
+  function fmtDurationMs(ms) {
+    if (!ms && ms !== 0) return "—";
+    if (ms < 60_000) return Math.ceil(ms / 1000) + "s";
+    if (ms < 3_600_000) return Math.ceil(ms / 60_000) + "m";
+    return (ms / 3_600_000).toFixed(1) + "h";
   }
 
   function toggleInfraS3Fields() {
@@ -810,10 +867,23 @@
       });
   });
 
+  function syncLogSummary() {
+    const n = logEntryCount;
+    $logSummary.text(n === 0 ? "No entries" : n === 1 ? "1 entry" : n + " entries");
+  }
+
+  function setLogDockExpanded(expanded) {
+    $logDock.toggleClass("is-expanded", expanded);
+    $("#logDockPanel").prop("hidden", !expanded);
+    $("#btnToggleLog").attr("aria-expanded", expanded ? "true" : "false");
+  }
+
   function log(msg, isErr) {
     const $line = $("<div>").addClass(isErr ? "log-err" : "log-ok");
     $line.text("[" + new Date().toLocaleTimeString() + "] " + msg);
     $log.prepend($line);
+    logEntryCount += 1;
+    syncLogSummary();
   }
 
   function fmtTime(ms) {
@@ -969,6 +1039,7 @@
     $("#" + panelId).removeAttr("hidden");
     $("#mainNav [data-panel]").removeClass("active");
     $('#mainNav [data-panel="' + panelId + '"]').addClass("active");
+    $(".content").toggleClass("content-docs-mode", panelId === "panel-docs");
     onPanelShown(panelId);
   }
 
@@ -983,6 +1054,42 @@
     $("#enqQueueId").val(qid);
   });
 
+  function refreshBlockedHosts() {
+    const $tb = $("#blockedHostsBody").empty();
+    apiGetJSON(apiBase() + "/v1/destinations/blocked")
+      .done(function (data) {
+        const hosts = data.hosts || [];
+        hosts.forEach(function (h) {
+          const $tr = $("<tr>");
+          $tr.append(td(h.host, "mono"));
+          $tr.append(td(fmtDurationMs(h.remaining_ms), "muted"));
+          const $act = actionsCell();
+          $act.append(
+            $("<button>")
+              .addClass("btn-sm btn-destructive")
+              .text("Unblock")
+              .on("click", function () {
+                apiPostJSON(apiBase() + "/v1/destinations/unblock", { host: h.host })
+                  .done(function () {
+                    log("Unblocked " + h.host);
+                    refreshBlockedHosts();
+                  })
+                  .fail(function (xhr) {
+                    log("Unblock failed: " + apiErrorText(xhr), true);
+                  });
+              })
+          );
+          $tr.append($act);
+          $tb.append($tr);
+        });
+        if (!hosts.length) emptyRow($tb, 3, "No blocked hosts");
+      })
+      .fail(function (xhr) {
+        emptyRow($tb, 3, "Failed to load blocked hosts");
+        log("Blocked hosts failed: " + apiErrorText(xhr), true);
+      });
+  }
+
   function refreshDashboard() {
     pollHealth();
     pollClusterStatus();
@@ -995,6 +1102,16 @@
       .fail(function () {
         $("#dashQueues").text("—");
         $("#dashQueuesSub").text("");
+      });
+    apiGetJSON(apiBase() + "/v1/groups")
+      .done(function (d) {
+        const n = (d.groups || []).length;
+        $("#dashGroups").text(n);
+        $("#dashGroupsSub").text(n ? "fan-out groups" : "none yet");
+      })
+      .fail(function () {
+        $("#dashGroups").text("—");
+        $("#dashGroupsSub").text("");
       });
     apiGetJSON(apiBase() + "/v1/flows")
       .done(function (d) {
@@ -1016,6 +1133,23 @@
       .fail(function () {
         $("#dashSchedules").text("—");
         $("#dashSchedulesSub").text("");
+      });
+    apiGetJSON(apiBase() + "/v1/dlq/sources")
+      .done(function (sources) {
+        const total = (sources || []).reduce(function (sum, s) {
+          return sum + (s.count || 0);
+        }, 0);
+        const withMsgs = (sources || []).filter(function (s) {
+          return s.count > 0;
+        }).length;
+        $("#dashDlq").text(total);
+        $("#dashDlqSub").text(withMsgs ? withMsgs + " source(s) with messages" : "all clear");
+        if (total > 0) $("#dashDlq").addClass("kpi-bad");
+        else $("#dashDlq").removeClass("kpi-bad");
+      })
+      .fail(function () {
+        $("#dashDlq").text("—");
+        $("#dashDlqSub").text("");
       });
   }
 
@@ -1241,21 +1375,102 @@
       });
   }
 
+  function refreshDlqSources(selectTopic) {
+    const $sel = $("#dlqSource");
+    return apiGetJSON(apiBase() + "/v1/dlq/sources")
+      .done(function (sources) {
+        $sel.empty();
+        if (!sources.length) {
+          $sel.append($("<option>").val("").text("No DLQ sources"));
+          $("#dlqTopicHint").text("");
+          return;
+        }
+        let pick = selectTopic;
+        sources.forEach(function (s) {
+          const label = s.label + (s.count ? " (" + s.count + ")" : "");
+          const $opt = $("<option>").val(s.dlq_topic).text(label).attr("data-kind", s.kind);
+          if (s.queue) $opt.attr("data-queue", s.queue);
+          $sel.append($opt);
+          if (!pick && s.count > 0) pick = s.dlq_topic;
+        });
+        if (!pick) pick = sources[0].dlq_topic;
+        if (selectTopic) pick = selectTopic;
+        $sel.val(pick);
+        $("#dlqTopicHint").text(pick || "");
+      })
+      .fail(function (xhr) {
+        $sel.empty().append($("<option>").val("").text("Failed to load sources"));
+        log("DLQ sources failed: " + ((xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText), true);
+      });
+  }
+
+  function deleteDlqMessage(m, dlqTopic) {
+    if (!window.confirm("Delete this DLQ message permanently?")) return;
+    const qs =
+      "dlq_topic=" +
+      encodeURIComponent(dlqTopic) +
+      "&partition=" +
+      m.partition +
+      "&offset=" +
+      m.offset;
+    apiDeleteJSON(apiBase() + "/v1/dlq?" + qs)
+      .done(function () {
+        log("DLQ message deleted");
+        refreshDlqSources(dlqTopic).always(function () {
+          refreshDlq();
+          refreshDashboard();
+        });
+      })
+      .fail(function (xhr) {
+        log("DLQ delete failed: " + apiErrorText(xhr), true);
+      });
+  }
+
   function refreshDlq() {
     const $tb = $("#dlqBody").empty();
-    const q = $("#dlqQueue").val() || "jobs";
+    const dlqTopic = $("#dlqSource").val();
     const limit = parseInt($("#dlqLimit").val(), 10) || 20;
-    apiGetJSON(apiBase() + "/v1/dlq?queue=" + encodeURIComponent(q) + "&limit=" + limit)
+    if (!dlqTopic) {
+      emptyRow($tb, 6, "Select a DLQ source");
+      return;
+    }
+    const $opt = $("#dlqSource option:selected");
+    const queue = $opt.attr("data-queue");
+    const qs = queue
+      ? "queue=" + encodeURIComponent(queue)
+      : "dlq_topic=" + encodeURIComponent(dlqTopic);
+    apiGetJSON(apiBase() + "/v1/dlq?" + qs + "&limit=" + limit)
       .done(function (data) {
+        $("#dlqTopicHint").text(data.dlq_topic || dlqTopic);
         (data.messages || []).forEach(function (m) {
           const $tr = $("<tr>");
           $tr.append(td(m.message_id, "mono"));
-          $tr.append(td(m.key));
+          $tr.append(td(m.source_queue || "—", "muted"));
+          $tr.append(td(trunc(m.destination_url || "—", 40), "mono"));
           $tr.append(td(fmtTime(m.published_at_ms), "muted"));
-          $tr.append(td(trunc(m.body, 60), "mono"));
+          $tr.append(td(trunc(m.body, 48), "mono"));
+          const $act = actionsCell();
+          $act.append(
+            $("<button>")
+              .addClass("btn-sm btn-ghost")
+              .text("View")
+              .on("click", function () {
+                showJsonModal("DLQ · " + m.message_id, m.body);
+              })
+          );
+          $act.append(
+            $("<button>")
+              .addClass("btn-sm btn-destructive")
+              .text("Delete")
+              .on("click", function () {
+                deleteDlqMessage(m, data.dlq_topic || dlqTopic);
+              })
+          );
+          $tr.append($act);
           $tb.append($tr);
         });
-        if (!(data.messages || []).length) emptyRow($tb, 4, 'DLQ empty for "' + q + '"');
+        const label = $opt.text() || data.dlq_topic;
+        if (!(data.messages || []).length) emptyRow($tb, 6, "DLQ empty for " + label);
         log("DLQ: " + (data.messages || []).length + " on " + data.dlq_topic);
       })
       .fail(function (xhr) {
@@ -1265,14 +1480,18 @@
 
   function onPanelShown(panelId) {
     pollHealth();
-    if (panelId === "panel-dlq") refreshDlq();
+    if (panelId === "panel-dlq") {
+      const cur = $("#dlqSource").val();
+      refreshDlqSources(cur).always(refreshDlq);
+    }
     if (panelId === "panel-dashboard") refreshDashboard();
+    if (panelId === "panel-http") refreshBlockedHosts();
     if (panelId === "panel-infra") refreshInfra();
     if (panelId === "panel-schedules") refreshJobs();
     if (panelId === "panel-queues") refreshEndpoints();
     if (panelId === "panel-groups") refreshGroups();
     if (panelId === "panel-flows") refreshFlows();
-    if (panelId === "panel-docs") syncDocsUrls();
+    if (panelId === "panel-docs") loadDocsFrame();
   }
 
   $("#btnDashPublish").on("click", function () {
@@ -1309,9 +1528,57 @@
   });
 
   $("#btnRefreshDlq").on("click", refreshDlq);
-  $("#btnClearLog").on("click", function () {
-    $log.empty();
+  $("#dlqSource").on("change", refreshDlq);
+
+  $("#btnModalClose, #btnModalClose2").on("click", closeJsonModal);
+  $("#modalBackdrop").on("click", function (e) {
+    if (e.target === this) closeJsonModal();
   });
+  $("#btnModalCopy").on("click", function () {
+    if (!modalCopyText) return;
+    navigator.clipboard.writeText(modalCopyText).then(
+      function () {
+        log("Copied to clipboard");
+      },
+      function () {
+        log("Copy failed", true);
+      }
+    );
+  });
+
+  $("#btnRefreshBlocked").on("click", refreshBlockedHosts);
+  $("#btnBlockHost").on("click", function () {
+    const host = ($("#blockHostInput").val() || "").trim();
+    const mins = parseInt($("#blockHostMinutes").val(), 10) || 30;
+    if (!host) {
+      log("Host or URL required", true);
+      return;
+    }
+    apiPostJSON(apiBase() + "/v1/destinations/block", {
+      host: host,
+      duration_ms: mins * 60 * 1000,
+    })
+      .done(function (res) {
+        log("Blocked " + (res.host || host) + " for " + mins + "m");
+        $("#blockHostInput").val("");
+        refreshBlockedHosts();
+      })
+      .fail(function (xhr) {
+        log("Block failed: " + apiErrorText(xhr), true);
+      });
+  });
+  $("#btnToggleLog").on("click", function () {
+    setLogDockExpanded(!$logDock.hasClass("is-expanded"));
+  });
+
+  $("#btnClearLog").on("click", function (e) {
+    e.stopPropagation();
+    $log.empty();
+    logEntryCount = 0;
+    syncLogSummary();
+  });
+
+  syncLogSummary();
 
   $("#cronScheduleType").on("change", function () {
     const interval = $(this).val() === "interval";
@@ -1852,7 +2119,7 @@
       });
   });
 
-  syncDocsUrls();
+  syncDocsLinks();
   initAuth();
 })();
 

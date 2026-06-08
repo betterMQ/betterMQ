@@ -130,7 +130,8 @@
           },
           "max_retries": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "description": "Retry attempts after the first failure. 0 = no retries (single delivery attempt)."
           },
           "idempotency_key": {
             "type": "string"
@@ -185,7 +186,8 @@
             "type": "integer"
           },
           "max_retries": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Retry attempts after the first failure. 0 = no retries (single delivery attempt)."
           },
           "idempotency_key": {
             "type": "string"
@@ -328,7 +330,8 @@
             "type": "string"
           },
           "max_retries": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Retry attempts after the first failure. 0 = no retries (single delivery attempt)."
           },
           "retry_backoff": {
             "$ref": "#/components/schemas/RetryBackoff"
@@ -584,6 +587,44 @@
           "published_at_ms": {
             "type": "integer",
             "format": "int64"
+          },
+          "source_queue": {
+            "type": "string"
+          },
+          "destination_url": {
+            "type": "string"
+          }
+        }
+      },
+      "DlqSourceResponse": {
+        "type": "object",
+        "required": [
+          "dlq_topic",
+          "kind",
+          "label",
+          "count"
+        ],
+        "properties": {
+          "dlq_topic": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "queue",
+              "direct",
+              "group_member",
+              "other"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "queue": {
+            "type": "string"
           }
         }
       },
@@ -914,6 +955,178 @@
             "format": "uuid"
           }
         }
+      },
+      "FlowListResponse": {
+        "type": "object",
+        "properties": {
+          "flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowProfileResponse"
+            }
+          }
+        }
+      },
+      "CronListResponse": {
+        "type": "object",
+        "properties": {
+          "crons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CronResponse"
+            }
+          }
+        }
+      },
+      "DelayedListResponse": {
+        "type": "object",
+        "properties": {
+          "delayed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DelayedJobResponse"
+            }
+          }
+        }
+      },
+      "GroupMemberListResponse": {
+        "type": "object",
+        "properties": {
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupMemberRecord"
+            }
+          }
+        }
+      },
+      "GroupDetailResponse": {
+        "type": "object",
+        "properties": {
+          "group": {
+            "$ref": "#/components/schemas/GroupRecord"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupMemberRecord"
+            }
+          }
+        }
+      },
+      "ClusterNodeStatus": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "addr": {
+            "type": "string"
+          },
+          "healthy": {
+            "type": "boolean"
+          },
+          "is_self": {
+            "type": "boolean"
+          },
+          "led_shards": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "preferred_shards": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "ShardLeaderStatus": {
+        "type": "object",
+        "properties": {
+          "shard": {
+            "type": "integer"
+          },
+          "leader_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leader_addr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "preferred_leader_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "failover": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ClusterStatusResponse": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "cluster_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "generation": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "this_node_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "node_count": {
+            "type": "integer"
+          },
+          "healthy_count": {
+            "type": "integer"
+          },
+          "scheduler_leader_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "this_node_scheduler_leader": {
+            "type": "boolean"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClusterNodeStatus"
+            }
+          },
+          "shards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShardLeaderStatus"
+            }
+          }
+        }
       }
     }
   },
@@ -1061,7 +1274,14 @@
         ],
         "responses": {
           "202": {
-            "description": "Accepted"
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1205,7 +1425,14 @@
         },
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueRecord"
+                }
+              }
+            }
           }
         }
       }
@@ -1242,70 +1469,6 @@
         }
       }
     },
-    "/v1/endpoints": {
-      "get": {
-        "tags": [
-          "Queues"
-        ],
-        "operationId": "listEndpoints",
-        "summary": "List queues (legacy alias)",
-        "deprecated": true,
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "Queues"
-        ],
-        "operationId": "createEndpoint",
-        "summary": "Create queue (legacy alias)",
-        "deprecated": true,
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateQueueBody"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Created"
-          }
-        }
-      }
-    },
-    "/v1/endpoints/{endpoint_id}": {
-      "delete": {
-        "tags": [
-          "Queues"
-        ],
-        "operationId": "deleteEndpoint",
-        "summary": "Delete queue (legacy alias)",
-        "deprecated": true,
-        "parameters": [
-          {
-            "name": "endpoint_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Deleted"
-          }
-        }
-      }
-    },
     "/v1/flows": {
       "get": {
         "tags": [
@@ -1315,7 +1478,14 @@
         "summary": "List flow profiles",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowListResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -1337,7 +1507,14 @@
         },
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowProfileResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1362,7 +1539,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Deleted"
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowProfileResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1630,7 +1814,14 @@
         "summary": "List cron schedules",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CronListResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -1652,7 +1843,14 @@
         },
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CronResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1675,7 +1873,14 @@
         ],
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CronResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -1696,7 +1901,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Deleted"
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CronResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1772,7 +1984,14 @@
         "summary": "List delayed jobs",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DelayedListResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1818,6 +2037,15 @@
           {
             "name": "queue",
             "in": "query",
+            "description": "Primary queue name (`jobs` → `jobs.__dlq`).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dlq_topic",
+            "in": "query",
+            "description": "Full DLQ topic (`__direct.__dlq`, `__group.{id}.{member}.__dlq`, …). Use when not a named queue.",
             "schema": {
               "type": "string"
             }
@@ -1838,6 +2066,30 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DlqListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dlq/sources": {
+      "get": {
+        "tags": [
+          "DLQ"
+        ],
+        "operationId": "listDlqSources",
+        "summary": "List DLQ buckets (queues, direct publish, group members)",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DlqSourceResponse"
+                  }
                 }
               }
             }
@@ -1953,7 +2205,14 @@
         },
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupRecord"
+                }
+              }
+            }
           }
         }
       }
@@ -1978,7 +2237,14 @@
         ],
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupDetailResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -2001,7 +2267,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Deleted"
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupRecord"
+                }
+              }
+            }
           }
         }
       }
@@ -2026,7 +2299,14 @@
         ],
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupMemberListResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -2059,7 +2339,14 @@
         },
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupMemberRecord"
+                }
+              }
+            }
           }
         }
       }
@@ -2093,7 +2380,14 @@
         ],
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupMemberRecord"
+                }
+              }
+            }
           }
         }
       },
@@ -2125,7 +2419,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Deleted"
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupMemberRecord"
+                }
+              }
+            }
           }
         }
       }
@@ -2181,7 +2482,14 @@
         "summary": "Cluster health and shard leadership",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatusResponse"
+                }
+              }
+            }
           }
         }
       }

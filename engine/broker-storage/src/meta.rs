@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LogMeta {
     pub next_offset: u64,
     pub segment_roll_count: u64,
+    /// Offsets tombstoned by purge (local log bytes are not rewritten).
+    #[serde(default)]
+    pub purged_offsets: BTreeSet<u64>,
 }
 
 impl LogMeta {

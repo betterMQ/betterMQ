@@ -11,7 +11,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-cloud = []
+
+[lints]
+workspace = true
 
 [dependencies]
 rust-embed = "8"

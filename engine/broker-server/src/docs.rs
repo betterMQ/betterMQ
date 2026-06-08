@@ -11,11 +11,7 @@ use axum::{
 const OPENAPI_JSON: &str = include_str!("../openapi/bettermq.cloud.openapi.json");
 #[cfg(not(feature = "cloud"))]
 const OPENAPI_JSON: &str = include_str!("../openapi/bettermq.openapi.json");
-const SCALAR_TEMPLATE: &str = include_str!("../embedded/scalar.html");
-
-fn scalar_html() -> String {
-    SCALAR_TEMPLATE.replace("__OPENAPI_SPEC__", OPENAPI_JSON)
-}
+const SCALAR_HTML: &str = include_str!("../embedded/scalar.html");
 
 pub fn router() -> Router {
     Router::new()
@@ -37,6 +33,6 @@ async fn openapi_json() -> Response {
         .into_response()
 }
 
-async fn scalar() -> Html<String> {
-    Html(scalar_html())
+async fn scalar() -> Html<&'static str> {
+    Html(SCALAR_HTML)
 }

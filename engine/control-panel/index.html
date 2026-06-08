@@ -49,7 +49,7 @@
   <div class="app-layout">
     <aside class="app-sidebar">
       <div class="app-sidebar-brand">
-        <div class="brand-mark" aria-hidden="true">SB</div>
+        <div class="brand-mark" aria-hidden="true">MQ</div>
         <div>
           <h1>BetterMQ</h1>
           <span>Webhook broker</span>
@@ -124,10 +124,10 @@
         <section class="view-panel" id="panel-dashboard">
           <div class="page-head">
             <h2>Overview</h2>
-            <p>Broker health and resource counts · last refresh on load</p>
+            <p>Broker health and resource counts · refreshes on load</p>
           </div>
 
-          <div class="kpi-grid">
+          <div class="kpi-grid kpi-grid-wide">
             <div class="kpi-card">
               <p class="kpi-label">Status</p>
               <p id="dashHealth" class="kpi-value">…</p>
@@ -140,6 +140,11 @@
               <p id="dashQueuesSub" class="kpi-sub"></p>
             </div>
             <div class="kpi-card">
+              <p class="kpi-label">Groups</p>
+              <p id="dashGroups" class="kpi-value">—</p>
+              <p id="dashGroupsSub" class="kpi-sub">fan-out</p>
+            </div>
+            <div class="kpi-card">
               <p class="kpi-label">Flows</p>
               <p id="dashFlows" class="kpi-value">—</p>
               <p id="dashFlowsSub" class="kpi-sub"></p>
@@ -148,6 +153,11 @@
               <p class="kpi-label">Schedules</p>
               <p id="dashSchedules" class="kpi-value">—</p>
               <p id="dashSchedulesSub" class="kpi-sub"></p>
+            </div>
+            <div class="kpi-card">
+              <p class="kpi-label">DLQ</p>
+              <p id="dashDlq" class="kpi-value">—</p>
+              <p id="dashDlqSub" class="kpi-sub">failed deliveries</p>
             </div>
             <div class="kpi-card" id="dashClusterCard">
               <p class="kpi-label">Cluster</p>
@@ -204,9 +214,12 @@
                 <p>How messages leave BetterMQ</p>
               </header>
               <section class="prose-sm">
-                <p><strong>Publish</strong> — immediate 1:1 webhook unless <code>flow_id</code> is set.</p>
+                <p><strong>Publish</strong> — one-off webhook (<code>__direct</code>).</p>
                 <p><strong>Enqueue</strong> — FIFO per queue + routing key.</p>
-                <p><strong>Flows</strong> — rate limits via <code>POST /v1/flows</code>.</p>
+                <p><strong>Groups</strong> — fan-out to multiple member webhooks.</p>
+                <p><strong>Flows</strong> — rate / parallelism on publish paths.</p>
+                <p><strong>Schedules</strong> — cron or interval direct webhooks.</p>
+                <p><strong>DLQ</strong> — per-source dead letters after retries or hard HTTP errors.</p>
                 <p class="text-xs" style="margin-top:0.75rem">Standalone: set password in <strong>Settings</strong> for your <code>sk_local_…</code> token.</p>
               </section>
             </div>
@@ -240,18 +253,25 @@
 
         <!-- Queues -->
         <section class="view-panel panel-stack" id="panel-queues" hidden>
-          <div class="page-head">
-            <h2>Queues</h2>
-            <p><code class="mono text-xs">POST /v1/queues</code></p>
+          <div class="page-hero">
+            <div class="page-hero-icon" aria-hidden="true">Q</div>
+            <div class="page-hero-body">
+              <div class="page-hero-top">
+                <h2>Queues</h2>
+                <span class="method-badge">POST</span>
+              </div>
+              <p class="page-hero-desc">Register a named destination — every enqueue delivers to the queue’s webhook URL with HMAC signing.</p>
+              <code class="page-hero-route">/v1/queues</code>
+            </div>
           </div>
           <div class="card">
-            <header><h2>Create queue</h2></header>
+            <header><h2>Create queue</h2><p>Name, webhook URL, and default retry policy</p></header>
             <section>
               <form class="form form-grid form-grid-3" onsubmit="return false">
                 <div class="sb-field"><label for="epQueue">Name</label><input class="sb-input" id="epQueue" value="jobs" /></div>
                 <div class="sb-field span-2"><label for="epUrl">Webhook URL</label><input id="epUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
                 <div class="sb-field"><label for="epSecret">HMAC secret</label><input id="epSecret" value="whsec_demo" class="sb-input mono" /></div>
-                <div class="sb-field"><label for="epMaxRetries">Default max retries</label><input class="sb-input" id="epMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = one attempt only</p></div>
+                <div class="sb-field"><label for="epMaxRetries">Default max retries</label><input class="sb-input" id="epMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = no retries</p></div>
                 <div id="epRetryBackoffFields" class="span-3 form-grid form-grid-3 hidden" style="grid-column:1/-1">
                   <div class="sb-field"><label for="epRetryKind">Backoff</label><select id="epRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
                   <div class="sb-field"><label for="epRetryInitialMs">Delay (ms)</label><input class="sb-input" id="epRetryInitialMs" type="number" value="500" min="1" /></div>
@@ -275,75 +295,110 @@
 
         <!-- Groups -->
         <section class="view-panel panel-stack" id="panel-groups" hidden>
-          <div class="page-head">
-            <h2>Groups</h2>
-            <p><code class="mono text-xs">POST /v1/groups/{id}/publish</code> — fan-out to multiple webhook destinations</p>
+          <div class="page-hero">
+            <div class="page-hero-icon" aria-hidden="true">G</div>
+            <div class="page-hero-body">
+              <div class="page-hero-top">
+                <h2>Groups</h2>
+                <span class="method-badge">POST</span>
+              </div>
+              <p class="page-hero-desc">Fan-out one payload to every active member — each with its own URL, secret, and flow limits.</p>
+              <code class="page-hero-route">/v1/groups/{id}/publish</code>
+            </div>
           </div>
-          <div class="card prose-sm" style="margin-bottom:0.75rem">
-            <p><strong>Groups</strong> deliver one payload to every active member. Each member has its own URL, secret, and rate / parallelism limits.</p>
+
+          <div class="callout">
+            <div class="callout-body">
+              <p><strong>How groups work</strong> — create a group, add members (webhook destinations), then publish once. BetterMQ delivers to every member in parallel, respecting each member’s rate and parallelism settings.</p>
+            </div>
           </div>
-          <div class="card">
-            <header><h2>Create group</h2></header>
+
+          <div class="page-grid-2">
+            <div class="panel-stack">
+              <div class="card">
+                <header><h2>Create group</h2><p>A logical fan-out target (e.g. alerts, billing)</p></header>
+                <section>
+                  <form class="form form-grid" onsubmit="return false">
+                    <div class="sb-field"><label for="grpName">Name</label><input class="sb-input" id="grpName" value="alerts" placeholder="alerts" /></div>
+                  </form>
+                </section>
+                <footer><button type="button" id="btnCreateGroup" class="btn btn-primary">Create group</button></footer>
+              </div>
+              <div class="card">
+                <header class="card-header-row">
+                  <div>
+                    <h2>Registered</h2>
+                    <p>Groups on this broker</p>
+                  </div>
+                </header>
+                <section class="table-wrap">
+                  <table class="table">
+                    <thead><tr><th>ID</th><th>Name</th><th></th></tr></thead>
+                    <tbody id="groupsBody"></tbody>
+                  </table>
+                </section>
+              </div>
+            </div>
+
+            <div class="panel-stack">
+              <div class="card">
+                <header><h2>Members</h2><p>Webhook destinations that receive each group publish</p></header>
+                <section>
+                  <form class="form form-grid form-grid-2" onsubmit="return false">
+                    <div class="sb-field span-2"><label for="grpMemberGroup">Group</label><select id="grpMemberGroup" class="sb-select"><option value="">— select group —</option></select></div>
+                    <div class="sb-field"><label for="grpMemberName">Name</label><input class="sb-input" id="grpMemberName" value="primary" /></div>
+                    <div class="sb-field"><label for="grpMemberSecret">Secret</label><input id="grpMemberSecret" value="whsec_demo" class="sb-input mono" /></div>
+                    <div class="sb-field span-2"><label for="grpMemberUrl">Webhook URL</label><input id="grpMemberUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
+                    <div class="sb-field"><label for="grpMemberParallelism">Parallelism</label><input class="sb-input" id="grpMemberParallelism" type="number" value="1" min="1" /></div>
+                    <div class="sb-field"><label for="grpMemberRate">Rate</label><input class="sb-input" id="grpMemberRate" type="number" value="0" min="0" /><p class="field-hint">0 = unlimited</p></div>
+                    <div class="sb-field"><label for="grpMemberPeriod">Period (s)</label><input class="sb-input" id="grpMemberPeriod" type="number" value="60" min="1" /></div>
+                  </form>
+                </section>
+                <footer><button type="button" id="btnAddGroupMember" class="btn btn-primary">Add member</button></footer>
+                <section class="table-wrap" style="margin-top:1rem">
+                  <table class="table">
+                    <thead><tr><th>ID</th><th>Name</th><th>URL</th><th>Limits</th><th></th></tr></thead>
+                    <tbody id="groupMembersBody"></tbody>
+                  </table>
+                </section>
+              </div>
+            </div>
+          </div>
+
+          <div class="card card-accent-top" style="margin-top:1rem">
+            <header><h2>Test publish</h2><p>Send a payload to all members of a group</p></header>
             <section>
-              <form class="form form-grid form-grid-2" onsubmit="return false">
-                <div class="sb-field"><label for="grpName">Name</label><input class="sb-input" id="grpName" value="alerts" /></div>
-              </form>
-            </section>
-            <footer><button type="button" id="btnCreateGroup" class="btn btn-primary">Create</button></footer>
-          </div>
-          <div class="card">
-            <header><h2>Registered</h2></header>
-            <section class="table-wrap">
-              <table class="table">
-                <thead><tr><th>ID</th><th>Name</th><th></th></tr></thead>
-                <tbody id="groupsBody"></tbody>
-              </table>
-            </section>
-          </div>
-          <div class="card">
-            <header><h2>Members</h2></header>
-            <section>
-              <form class="form form-grid form-grid-3" onsubmit="return false">
-                <div class="sb-field span-3"><label for="grpMemberGroup">Group</label><select id="grpMemberGroup" class="sb-select"><option value="">— select group —</option></select></div>
-                <div class="sb-field"><label for="grpMemberName">Name</label><input class="sb-input" id="grpMemberName" value="primary" /></div>
-                <div class="sb-field span-2"><label for="grpMemberUrl">Webhook URL</label><input id="grpMemberUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
-                <div class="sb-field"><label for="grpMemberSecret">Secret</label><input id="grpMemberSecret" value="whsec_demo" class="sb-input mono" /></div>
-                <div class="sb-field"><label for="grpMemberParallelism">Parallelism</label><input class="sb-input" id="grpMemberParallelism" type="number" value="1" min="1" /></div>
-                <div class="sb-field"><label for="grpMemberRate">Rate / period</label><input class="sb-input" id="grpMemberRate" type="number" value="0" min="0" /><p class="field-hint">0 = unlimited</p></div>
-                <div class="sb-field"><label for="grpMemberPeriod">Period (s)</label><input class="sb-input" id="grpMemberPeriod" type="number" value="60" min="1" /></div>
-              </form>
-            </section>
-            <footer><button type="button" id="btnAddGroupMember" class="btn btn-primary">Add member</button></footer>
-            <section class="table-wrap" style="margin-top:1rem">
-              <table class="table">
-                <thead><tr><th>ID</th><th>Name</th><th>URL</th><th>Limits</th><th></th></tr></thead>
-                <tbody id="groupMembersBody"></tbody>
-              </table>
-            </section>
-          </div>
-          <div class="card">
-            <header><h2>Test publish</h2></header>
-            <section>
-              <form class="form form-grid form-grid-2" onsubmit="return false">
+              <form class="form form-grid form-grid-2 form-panel" onsubmit="return false">
                 <div class="sb-field span-2"><label for="grpPubGroup">Group</label><select id="grpPubGroup" class="sb-select"><option value="">— select group —</option></select></div>
                 <div class="sb-field"><label for="grpPubKey">Key</label><input class="sb-input" id="grpPubKey" value="user-1" /></div>
                 <div class="sb-field span-2"><label for="grpPubBody">Body (JSON)</label><textarea id="grpPubBody" rows="3" class="sb-textarea mono text-xs">{"hello":"group"}</textarea></div>
               </form>
             </section>
-            <footer><button type="button" id="btnGroupPublish" class="btn btn-primary">Publish</button></footer>
+            <footer><button type="button" id="btnGroupPublish" class="btn btn-primary">Publish to group</button></footer>
           </div>
         </section>
 
         <!-- Publish -->
         <section class="view-panel" id="panel-publish" hidden>
-          <div class="page-head">
-            <h2>Publish</h2>
-            <p><code class="mono text-xs">POST /v1/publish</code> — one-off webhook delivery. No queue.</p>
+          <div class="page-hero">
+            <div class="page-hero-icon" aria-hidden="true">P</div>
+            <div class="page-hero-body">
+              <div class="page-hero-top">
+                <h2>Publish</h2>
+                <span class="method-badge">POST</span>
+              </div>
+              <p class="page-hero-desc">One-off webhook delivery — URL + secret only, pushed immediately. No queue required.</p>
+              <code class="page-hero-route">/v1/publish</code>
+            </div>
           </div>
-          <div class="card prose-sm" style="margin-bottom:0.75rem">
-            <p><strong>1:1 publish</strong> — URL + secret only. Immediate push, no rate limits.</p>
-            <p><strong>With flow profile</strong> — set <code>flow_id</code> to apply parallelism / rate limits (create under <strong>Flows</strong> first). Routing key should match the flow key.</p>
+
+          <div class="callout">
+            <div class="callout-body">
+              <p><strong>1:1 publish</strong> — immediate push to a single URL, no rate limits.</p>
+              <p><strong>With flow profile</strong> — set <code>flow_id</code> to apply parallelism / rate limits (create one under <strong>Flows</strong> first). The routing key should match the flow key.</p>
+            </div>
           </div>
+
           <div class="card">
             <section>
               <form class="form form-grid form-grid-2" onsubmit="return false">
@@ -351,7 +406,7 @@
                 <div class="sb-field"><label for="pubSecret">Secret</label><input id="pubSecret" value="whsec_demo" class="sb-input mono" /></div>
                 <div class="sb-field"><label for="pubKey">Routing key</label><input class="sb-input" id="pubKey" value="user-1" /><p class="field-hint">Must match flow key when using a profile</p></div>
                 <div class="sb-field"><label for="pubPriority">Priority (0–9)</label><input class="sb-input" id="pubPriority" type="number" value="5" min="0" max="9" /></div>
-                <div class="sb-field"><label for="pubMaxRetries">Max retries</label><input class="sb-input" id="pubMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = one attempt only</p></div>
+                <div class="sb-field"><label for="pubMaxRetries">Max retries</label><input class="sb-input" id="pubMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = no retries</p></div>
                 <div class="sb-field"><label for="pubDelay">Delay (ms)</label><input class="sb-input" id="pubDelay" type="number" placeholder="immediate" /></div>
                 <div id="pubRetryBackoffFields" class="span-2 form-grid form-grid-2 hidden" style="grid-column:1/-1">
                   <div class="sb-field"><label for="pubRetryKind">Backoff</label><select id="pubRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
@@ -370,21 +425,33 @@
 
         <!-- Enqueue -->
         <section class="view-panel" id="panel-enqueue" hidden>
-          <div class="page-head">
-            <h2>Enqueue</h2>
-            <p><code class="mono text-xs">POST /v1/queues/{id}/enqueue</code> — FIFO delivery to a registered queue</p>
+          <div class="page-hero">
+            <div class="page-hero-icon" aria-hidden="true">E</div>
+            <div class="page-hero-body">
+              <div class="page-hero-top">
+                <h2>Enqueue</h2>
+                <span class="method-badge">POST</span>
+              </div>
+              <p class="page-hero-desc">Add a job to a registered queue — FIFO ordering per routing key, delivered to the queue’s snapshot webhook URL.</p>
+              <code class="page-hero-route">/v1/queues/{id}/enqueue</code>
+            </div>
           </div>
-          <div class="card prose-sm" style="margin-bottom:0.75rem">
-            <p><strong>Queues</strong> — pick a queue created under <strong>Queues</strong>. Messages go to that queue’s webhook URL with built-in FIFO ordering.</p>
-            <p>For rate limits on one-off URLs, use <strong>Publish</strong> with a flow profile instead.</p>
+
+          <div class="callout">
+            <div class="callout-body">
+              <p><strong>Queues</strong> — pick a queue from <strong>Queues</strong>. Messages use that queue’s frozen destination URL and HMAC secret.</p>
+              <p>For one-off URLs with rate limits, use <strong>Publish</strong> with a flow profile instead.</p>
+            </div>
           </div>
+
           <div class="card">
+            <header><h2>New message</h2><p>Payload and delivery options</p></header>
             <section>
-              <form class="form form-grid form-grid-2" onsubmit="return false">
+              <form class="form form-grid form-grid-2 form-panel" onsubmit="return false">
                 <div class="sb-field span-2"><label for="enqQueueId">Queue</label><select id="enqQueueId" class="sb-select"><option value="">— create a queue first —</option></select></div>
                 <div class="sb-field"><label for="enqKey">Key</label><input class="sb-input" id="enqKey" value="user-1" /></div>
                 <div class="sb-field"><label for="enqPriority">Priority</label><input class="sb-input" id="enqPriority" type="number" value="5" /></div>
-                <div class="sb-field"><label for="enqMaxRetries">Max retries</label><input class="sb-input" id="enqMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = one attempt only</p></div>
+                <div class="sb-field"><label for="enqMaxRetries">Max retries</label><input class="sb-input" id="enqMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = no retries</p></div>
                 <div class="sb-field"><label for="enqDelay">Delay (ms)</label><input class="sb-input" id="enqDelay" type="number" /></div>
                 <div id="enqRetryBackoffFields" class="span-2 form-grid form-grid-2 hidden" style="grid-column:1/-1">
                   <div class="sb-field"><label for="enqRetryKind">Backoff</label><select id="enqRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
@@ -402,7 +469,17 @@
 
         <!-- Flows -->
         <section class="view-panel panel-stack" id="panel-flows" hidden>
-          <div class="page-head"><h2>Flows</h2><p>Rate + parallelism profiles for <strong>Publish</strong> (not queues)</p></div>
+          <div class="page-hero">
+            <div class="page-hero-icon" aria-hidden="true">F</div>
+            <div class="page-hero-body">
+              <div class="page-hero-top">
+                <h2>Flows</h2>
+                <span class="method-badge">POST</span>
+              </div>
+              <p class="page-hero-desc">Rate + parallelism profiles for <strong>Publish</strong> (not queues). Match the routing key to a profile’s key to apply its limits.</p>
+              <code class="page-hero-route">/v1/flows</code>
+            </div>
+          </div>
           <div class="card">
             <section>
               <form class="form form-grid form-grid-4" onsubmit="return false">
@@ -426,7 +503,17 @@
 
         <!-- Schedules -->
         <section class="view-panel panel-stack" id="panel-schedules" hidden>
-          <div class="page-head"><h2>Schedules</h2><p>Recurring jobs — direct webhook (like publish), not tied to a queue</p></div>
+          <div class="page-hero">
+            <div class="page-hero-icon" aria-hidden="true">S</div>
+            <div class="page-hero-body">
+              <div class="page-hero-top">
+                <h2>Schedules</h2>
+                <span class="method-badge">POST</span>
+              </div>
+              <p class="page-hero-desc">Recurring jobs — cron or fixed interval, delivered as a direct webhook (like publish), not tied to a queue.</p>
+              <code class="page-hero-route">/v1/crons</code>
+            </div>
+          </div>
           <div class="card">
             <section>
               <form class="form form-grid form-grid-2" onsubmit="return false">
@@ -441,7 +528,7 @@
                 <div class="sb-field span-2"><label for="cronUrl">Destination URL</label><input id="cronUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
                 <div class="sb-field"><label for="cronSecret">Secret</label><input id="cronSecret" value="whsec_demo" class="sb-input mono" /></div>
                 <div class="sb-field"><label for="cronPriority">Priority</label><input class="sb-input" id="cronPriority" type="number" value="5" /></div>
-                <div class="sb-field"><label for="cronMaxRetries">Max retries</label><input class="sb-input" id="cronMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = one attempt only</p></div>
+                <div class="sb-field"><label for="cronMaxRetries">Max retries</label><input class="sb-input" id="cronMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = no retries</p></div>
                 <div class="sb-field" id="cronExprWrap"><label for="cronExpr">Cron</label><input id="cronExpr" value="*/1 * * * *" class="sb-input mono" /></div>
                 <div class="sb-field hidden" id="cronIntervalWrap"><label for="cronEverySeconds">Every (sec)</label><input class="sb-input" id="cronEverySeconds" type="number" value="10" /></div>
                 <div class="sb-field"><label for="cronFlowId">Flow profile (optional)</label><input id="cronFlowId" class="sb-input mono text-xs" placeholder="rate limits on publish" /></div>
@@ -468,11 +555,35 @@
 
         <!-- DLQ -->
         <section class="view-panel panel-stack" id="panel-dlq" hidden>
-          <div class="page-head"><h2>Dead letter queue</h2></div>
+          <div class="page-hero">
+            <div class="page-hero-icon" aria-hidden="true">D</div>
+            <div class="page-hero-body">
+              <div class="page-hero-top">
+                <h2>Dead letter queue</h2>
+                <span class="method-badge method-badge-get">GET</span>
+              </div>
+              <p class="page-hero-desc">Failed deliveries land in a per-source DLQ — pick the source that matches how the message was sent.</p>
+              <code class="page-hero-route">/v1/dlq</code>
+            </div>
+          </div>
+
+          <div class="callout">
+            <div class="callout-body">
+              <p><strong>Queue enqueue</strong> → <code>jobs.__dlq</code> (queue name + <code>.__dlq</code>)</p>
+              <p><strong>Direct publish</strong> → <code>__direct.__dlq</code> (one-off <code>POST /v1/publish</code>)</p>
+              <p><strong>Group fan-out</strong> → one DLQ per member (<code>__group.{group}.{member}.__dlq</code>)</p>
+              <p>Flow profiles only rate-limit delivery — they do not change which DLQ bucket is used.</p>
+            </div>
+          </div>
+
           <div class="card">
             <section>
               <form class="form form-row" onsubmit="return false">
-                <div class="sb-field"><label for="dlqQueue">Queue</label><input class="sb-input" id="dlqQueue" value="jobs" /></div>
+                <div class="sb-field" style="flex:1;min-width:12rem">
+                  <label for="dlqSource">Source</label>
+                  <select id="dlqSource" class="sb-select"><option value="">Loading sources…</option></select>
+                  <p class="field-hint" id="dlqTopicHint"></p>
+                </div>
                 <div class="sb-field field-tight"><label for="dlqLimit">Limit</label><input class="sb-input" id="dlqLimit" type="number" value="20" /></div>
                 <button type="button" id="btnRefreshDlq" class="btn btn-outline">Load</button>
               </form>
@@ -481,7 +592,7 @@
           <div class="card">
             <section class="table-wrap">
               <table class="table">
-                <thead><tr><th>Message</th><th>Key</th><th>Published</th><th>Body</th></tr></thead>
+                <thead><tr><th>Message</th><th>Source</th><th>Destination</th><th>Published</th><th>Body</th><th></th></tr></thead>
                 <tbody id="dlqBody"></tbody>
               </table>
             </section>
@@ -489,9 +600,18 @@
         </section>
 
         <!-- HTTP -->
-        <section class="view-panel" id="panel-http" hidden>
-          <div class="page-head"><h2>HTTP defaults</h2><p>Applied to publish &amp; enqueue</p></div>
+        <section class="view-panel panel-stack" id="panel-http" hidden>
+          <div class="page-hero">
+            <div class="page-hero-icon" aria-hidden="true">H</div>
+            <div class="page-hero-body">
+              <div class="page-hero-top">
+                <h2>HTTP</h2>
+              </div>
+              <p class="page-hero-desc">Default outbound webhook options and delivery circuit-breaker controls.</p>
+            </div>
+          </div>
           <div class="card">
+            <header><h2>Outbound defaults</h2><p>Applied to publish &amp; enqueue from the panel</p></header>
             <section>
               <form class="form form-grid form-grid-2" onsubmit="return false">
                 <div class="sb-field">
@@ -513,6 +633,32 @@
                   <textarea id="outHeaders" rows="5" class="sb-textarea mono text-xs" placeholder='{"Authorization":"Bearer …"}'></textarea>
                 </div>
               </form>
+            </section>
+          </div>
+          <div class="card" id="blockedHostsCard">
+            <header>
+              <h2>Blocked destinations</h2>
+              <p>Hosts paused after transport failures — block manually or unblock below</p>
+            </header>
+            <section>
+              <form class="form form-row" onsubmit="return false">
+                <div class="sb-field" style="flex:1;min-width:12rem">
+                  <label for="blockHostInput">Host or URL</label>
+                  <input id="blockHostInput" class="sb-input mono text-xs" placeholder="https://api.example.com" />
+                </div>
+                <div class="sb-field field-tight">
+                  <label for="blockHostMinutes">Minutes</label>
+                  <input id="blockHostMinutes" type="number" class="sb-input" value="30" min="1" />
+                </div>
+                <button type="button" id="btnBlockHost" class="btn btn-outline">Block</button>
+                <button type="button" id="btnRefreshBlocked" class="btn btn-ghost">Refresh</button>
+              </form>
+              <div class="table-wrap" style="margin-top:1rem">
+                <table class="table">
+                  <thead><tr><th>Host</th><th>Remaining</th><th></th></tr></thead>
+                  <tbody id="blockedHostsBody"></tbody>
+                </table>
+              </div>
             </section>
           </div>
         </section>
@@ -773,14 +919,35 @@
         </section>
       </main>
 
-      <footer class="log-dock">
-        <div class="log-dock-inner">
-          <div class="log-dock-head">
-            <span>Activity</span>
+      <footer class="log-dock" id="logDock">
+        <button type="button" class="log-dock-bar" id="btnToggleLog" aria-expanded="false" aria-controls="logDockPanel">
+          <span class="log-dock-title">Activity</span>
+          <span class="log-dock-summary" id="logSummary">No entries</span>
+          <svg class="log-dock-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div class="log-dock-panel" id="logDockPanel" hidden>
+          <div class="log-dock-panel-head">
+            <span>Recent activity</span>
             <button type="button" id="btnClearLog" class="btn-sm btn-ghost">Clear</button>
           </div>
           <div id="log" class="mono"></div>
         </div>
+      </footer>
+    </div>
+  </div>
+
+  <div id="modalBackdrop" class="modal-backdrop hidden" role="presentation">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header class="modal-head">
+        <h3 id="modalTitle">Message</h3>
+        <button type="button" id="btnModalClose" class="btn-sm btn-ghost" aria-label="Close">×</button>
+      </header>
+      <section class="modal-body">
+        <pre id="modalJson" class="code-block mono"></pre>
+      </section>
+      <footer class="modal-foot">
+        <button type="button" id="btnModalCopy" class="btn btn-outline">Copy</button>
+        <button type="button" id="btnModalClose2" class="btn btn-primary">Close</button>
       </footer>
     </div>
   </div>
