@@ -25,10 +25,12 @@ jobs:
     outputs:
       version: ${{ steps.bump.outputs.version }}
       tag: ${{ steps.bump.outputs.tag }}
+      pr_number: ${{ steps.open_pr.outputs.pr_number }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
 
       - id: bump
         shell: bash
@@ -66,29 +68,45 @@ jobs:
             engine/broker-server/openapi/bettermq.openapi.json > /tmp/openapi.json
           mv /tmp/openapi.json engine/broker-server/openapi/bettermq.openapi.json
 
-      - name: Commit version bump, tag, and push release branch
-        id: release_branch
+      - name: Commit version bump and tag
+        id: commit
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml engine/broker-server/openapi/bettermq.openapi.json
           if git diff --staged --quiet; then
+            echo "nothing=true" >> "$GITHUB_OUTPUT"
             echo "Nothing to commit"
             exit 0
           fi
           TAG="${{ steps.bump.outputs.tag }}"
-          BRANCH="chore/release-${TAG}"
           git commit -m "chore(release): ${TAG}"
           git tag "${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Push to main (RELEASE_PAT)
+        if: steps.commit.outputs.nothing != 'true' && secrets.RELEASE_PAT != ''
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main "${{ steps.commit.outputs.tag }}"
+
+      - name: Push release branch (no RELEASE_PAT)
+        id: release_branch
+        if: steps.commit.outputs.nothing != 'true' && secrets.RELEASE_PAT == ''
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.commit.outputs.tag }}"
+          BRANCH="chore/release-${TAG}"
           git checkout -b "${BRANCH}"
           git push origin "${BRANCH}" "${TAG}"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
 
-      - name: Open pull request to main
+      - name: Open pull request (manual merge required)
+        id: open_pr
         if: steps.release_branch.outputs.branch != ''
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
         run: |
           set -euo pipefail
           TAG="${{ steps.bump.outputs.tag }}"
@@ -96,11 +114,20 @@ jobs:
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           BODY="Automated version bump from the [Release workflow](${RUN_URL}).
 
-          - Bumps \`Cargo.toml\` and OpenAPI \`info.version\` to **${{ steps.bump.outputs.version }}**
-          - Tag **${TAG}** is already pushed; build + GitHub release follow in this workflow run
-          - Merge this PR after the release is published so \`main\` stays in sync (requires **rust** CI)"
-          gh pr create --base main --head "${BRANCH}" --title "chore(release): ${TAG}" --body "${BODY}" \
-            || gh pr view "${BRANCH}" --json url --jq .url
+          - Bumps Cargo.toml and OpenAPI info.version to ${{ steps.bump.outputs.version }}
+          - Tag ${TAG} is pushed; build + GitHub release follow in this workflow
+          - **Requires your review and merge** after rust CI passes (not auto-merged)"
+          if ! gh pr create --base main --head "${BRANCH}" --title "chore(release): ${TAG}" --body "${BODY}"; then
+            if gh pr view "${BRANCH}" --json number --jq .number 2>/dev/null; then
+              echo "PR already exists for ${BRANCH}"
+            else
+              echo "::error::Could not create PR. Enable Settings → Actions → Allow GitHub Actions to create and approve pull requests, or add RELEASE_PAT to push main directly."
+              exit 1
+            fi
+          fi
+          PR="$(gh pr view "${BRANCH}" --json number --jq .number)"
+          echo "pr_number=${PR}" >> "$GITHUB_OUTPUT"
+          echo "Open PR #${PR} — merge manually when ready: ${RUN_URL}"
 
   build:
     needs: bump
