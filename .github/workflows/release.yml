@@ -85,15 +85,26 @@ jobs:
           git tag "${TAG}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
+      # secrets.* cannot be used in step if: — detect PAT via env in a prior step
+      - id: pat_check
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          if [[ -n "${RELEASE_PAT:-}" ]]; then
+            echo "has_pat=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_pat=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Push to main (RELEASE_PAT)
-        if: steps.commit.outputs.nothing != 'true' && secrets.RELEASE_PAT != ''
+        if: steps.commit.outputs.nothing != 'true' && steps.pat_check.outputs.has_pat == 'true'
         run: |
           set -euo pipefail
           git push origin HEAD:main "${{ steps.commit.outputs.tag }}"
 
       - name: Push release branch (no RELEASE_PAT)
         id: release_branch
-        if: steps.commit.outputs.nothing != 'true' && secrets.RELEASE_PAT == ''
+        if: steps.commit.outputs.nothing != 'true' && steps.pat_check.outputs.has_pat == 'false'
         run: |
           set -euo pipefail
           TAG="${{ steps.commit.outputs.tag }}"
