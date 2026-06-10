@@ -43,13 +43,29 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 info() { printf '%s→%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
 ok() { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 
-# Wordmark: better (default) + MQ (brand #1f47f0)
+# Figlet standard — upright betterMQ wordmark (readable in all terminals).
 print_logo() {
-  if [ -n "$C_BRAND" ]; then
-    printf '     better%sMQ%s\n' "$C_BRAND" "$C_RESET"
-  else
-    printf '     betterMQ\n'
-  fi
+  local lines=(
+    "  _          _   _            __  __  ___  "
+    " | |__   ___| |_| |_ ___ _ __|  \\/  |/ _ \\ "
+    " | '_ \\ / _ \\ __| __/ _ \\ '__| |\\/| | | | |"
+    " | |_) |  __/ |_| ||  __/ |  | |  | | |_| |"
+    " |_.__/ \\___|\\__|\\__\\___|_|  |_|  |_|\\__\\_\\"
+  )
+  local i=0
+  local last=$(( ${#lines[@]} - 1 ))
+  for line in "${lines[@]}"; do
+    if [ -n "$C_BRAND" ]; then
+      local t=$(( i * 100 / last ))
+      local r=$(( 31 + (100 - 31) * t / 100 ))
+      local g=$(( 71 + (145 - 71) * t / 100 ))
+      local b=$(( 200 + (255 - 200) * t / 100 ))
+      printf '\033[38;2;%d;%d;%dm%s\033[0m\n' "$r" "$g" "$b" "$line"
+    else
+      printf '%s\n' "$line"
+    fi
+    i=$((i + 1))
+  done
 }
 
 print_welcome() {
@@ -71,8 +87,8 @@ print_success() {
     return 0
   }
   printf '\n'
-  printf '%s%s✓%s better%sMQ%s %s%s%s installed%s\n\n' \
-    "$C_GREEN" "$C_BOLD" "$C_RESET" "$C_BRAND" "$C_RESET" "$C_GREEN" "$C_BOLD" "$ver" "$C_RESET"
+  printf '%s%s✓%s %sbetterMQ%s %s%s%s installed%s\n\n' \
+    "$C_GREEN" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_GREEN" "$C_BOLD" "$ver" "$C_RESET"
 }
 
 if command -v curl >/dev/null 2>&1; then

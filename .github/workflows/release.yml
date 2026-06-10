@@ -129,12 +129,19 @@ jobs:
           - Tag ${TAG} is pushed; build + GitHub release follow in this workflow
           - **Requires your review and merge** after rust CI passes (not auto-merged)"
           if ! gh pr create --base main --head "${BRANCH}" --title "chore(release): ${TAG}" --body "${BODY}"; then
+<<<<<<< Updated upstream
             if gh pr view "${BRANCH}" --json number --jq .number 2>/dev/null; then
               echo "PR already exists for ${BRANCH}"
             else
               echo "::error::Could not create PR. Enable Settings → Actions → Allow GitHub Actions to create and approve pull requests, or add RELEASE_PAT to push main directly."
               exit 1
             fi
+=======
+            echo "::warning::Could not auto-create PR."
+            echo "Enable repo Settings → Actions → Allow GitHub Actions to create and approve pull requests,"
+            echo "or open manually: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${BRANCH}?expand=1"
+            exit 0
+>>>>>>> Stashed changes
           fi
           PR="$(gh pr view "${BRANCH}" --json number --jq .number)"
           echo "pr_number=${PR}" >> "$GITHUB_OUTPUT"
