@@ -43,13 +43,9 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 info() { printf '%s→%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
 ok() { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 
-# Wordmark: better (default) + MQ (brand #1f47f0)
+# Wordmark: plain betterMQ, centered over the tagline.
 print_logo() {
-  if [ -n "$C_BRAND" ]; then
-    printf '     better%sMQ%s\n' "$C_BRAND" "$C_RESET"
-  else
-    printf '     betterMQ\n'
-  fi
+  printf '              betterMQ\n'
 }
 
 print_welcome() {
@@ -71,8 +67,8 @@ print_success() {
     return 0
   }
   printf '\n'
-  printf '%s%s✓%s better%sMQ%s %s%s%s installed%s\n\n' \
-    "$C_GREEN" "$C_BOLD" "$C_RESET" "$C_BRAND" "$C_RESET" "$C_GREEN" "$C_BOLD" "$ver" "$C_RESET"
+  printf '%s%s✓%s %sbetterMQ%s %s%s%s installed%s\n\n' \
+    "$C_GREEN" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_GREEN" "$C_BOLD" "$ver" "$C_RESET"
 }
 
 if command -v curl >/dev/null 2>&1; then

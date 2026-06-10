@@ -23,10 +23,7 @@ function Info($msg) { Write-Host "-> $msg" -ForegroundColor DarkGray }
 function Ok($msg) { Write-Host "OK $msg" -ForegroundColor Green }
 
 function Print-Logo {
-  $esc = [char]27
-  $brand = "${esc}[38;2;31;71;240m"
-  $reset = "${esc}[0m"
-  Write-Host "     better${brand}MQ${reset}"
+  Write-Host "              betterMQ"
 }
 
 function Print-Welcome {
