@@ -21,7 +21,7 @@ default-members = ["engine/broker-server"]
 version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/hackerrahul/BetterMQ"
+repository = "https://github.com/betterMQ/betterMQ"
 rust-version = "1.88"
 
 [workspace.dependencies]
