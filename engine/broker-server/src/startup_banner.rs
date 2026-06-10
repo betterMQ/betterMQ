@@ -37,10 +37,7 @@ pub fn print(settings: &ResolvedServeSettings, storage: StorageMode) {
     let _ = writeln!(out);
     print_logo(&mut out);
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "{DIM}{BOLD}     Http Messaging & Scheduling{RESET}"
-    );
+    let _ = writeln!(out, "{DIM}{BOLD}     Http Messaging & Scheduling{RESET}");
     let _ = writeln!(out);
     let _ = writeln!(out, "  {GREEN}●{RESET} {BOLD}RUNNING{RESET}");
     let _ = writeln!(out);
@@ -91,13 +88,7 @@ mod tests {
 
     #[test]
     fn maps_wildcard_bind_to_localhost() {
-        assert_eq!(
-            public_base_url("0.0.0.0:8080"),
-            "http://127.0.0.1:8080"
-        );
-        assert_eq!(
-            public_base_url("127.0.0.1:9090"),
-            "http://127.0.0.1:9090"
-        );
+        assert_eq!(public_base_url("0.0.0.0:8080"), "http://127.0.0.1:8080");
+        assert_eq!(public_base_url("127.0.0.1:9090"), "http://127.0.0.1:9090");
     }
 }
