@@ -1,17 +1,10 @@
-//! Colored startup banner for interactive terminals (ASCII logo + URLs, then logs below).
+//! Colored startup banner for interactive terminals (wordmark + URLs, then logs below).
 
 use broker_config::ResolvedServeSettings;
 use broker_storage::StorageMode;
 use std::io::{IsTerminal, Write};
 
-const LOGO: &[&str] = &[
-    "    __         __  __            __  _______ ",
-    "   / /_  ___  / /_/ /____  _____/  |/  / __ \\",
-    "  / __ \\/ _ \\/ __/ __/ _ \\/ ___/ /|_/ / / / /",
-    " / /_/ /  __/ /_/ /_/  __/ /  / /  / / /_/ / ",
-    "/_.___/\\___/\\__\\/\\__\\/\\___/_/  /_/  /_\\/\\___\\_\\ ",
-];
-
+const BRAND: &str = "\x1b[38;2;31;71;240m";
 const GREEN: &str = "\x1b[32m";
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
@@ -55,18 +48,7 @@ pub fn print(settings: &ResolvedServeSettings, storage: StorageMode) {
 }
 
 fn print_logo(out: &mut impl Write) {
-    let last = LOGO.len().saturating_sub(1);
-    for (i, line) in LOGO.iter().enumerate() {
-        let t = if last == 0 {
-            0.0
-        } else {
-            i as f32 / last as f32
-        };
-        let r = (31.0 + (100.0 - 31.0) * t) as u8;
-        let g = (71.0 + (145.0 - 71.0) * t) as u8;
-        let b = (200.0 + (255.0 - 200.0) * t) as u8;
-        let _ = writeln!(out, "\x1b[38;2;{r};{g};{b}m{line}{RESET}");
-    }
+    let _ = writeln!(out, "     better{BRAND}MQ{RESET}");
 }
 
 fn public_base_url(listen: &str) -> String {

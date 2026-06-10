@@ -85,12 +85,26 @@ jobs:
           git tag "${TAG}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-      # main is protected (PR + rust CI required) — never push HEAD:main; use a release branch + PR.
-      - name: Push release branch and tag
-        id: release_branch
-        if: steps.commit.outputs.nothing != 'true'
+      # secrets.* cannot be used in step if: — detect PAT via env in a prior step
+      - id: pat_check
         env:
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          if [[ -n "${RELEASE_PAT:-}" ]]; then
+            echo "has_pat=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_pat=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push to main (RELEASE_PAT)
+        if: steps.commit.outputs.nothing != 'true' && steps.pat_check.outputs.has_pat == 'true'
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main "${{ steps.commit.outputs.tag }}"
+
+      - name: Push release branch (no RELEASE_PAT)
+        id: release_branch
+        if: steps.commit.outputs.nothing != 'true' && steps.pat_check.outputs.has_pat == 'false'
         run: |
           set -euo pipefail
           TAG="${{ steps.commit.outputs.tag }}"
@@ -99,7 +113,7 @@ jobs:
           git push origin "${BRANCH}" "${TAG}"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
 
-      - name: Open pull request (merge version bump to main)
+      - name: Open pull request (manual merge required)
         id: open_pr
         if: steps.release_branch.outputs.branch != ''
         env:
@@ -113,20 +127,18 @@ jobs:
 
           - Bumps Cargo.toml and OpenAPI info.version to ${{ steps.bump.outputs.version }}
           - Tag ${TAG} is pushed; build + GitHub release follow in this workflow
-          - **Merge this PR after rust CI passes** so main matches the release tag"
-          EXISTING="$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')"
-          if [[ -n "${EXISTING}" ]]; then
-            echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
-            echo "PR already open: #${EXISTING}"
-            exit 0
-          fi
+          - **Requires your review and merge** after rust CI passes (not auto-merged)"
           if ! gh pr create --base main --head "${BRANCH}" --title "chore(release): ${TAG}" --body "${BODY}"; then
-            echo "::error::Could not create PR. Enable Settings → Actions → Allow GitHub Actions to create and approve pull requests."
-            exit 1
+            if gh pr view "${BRANCH}" --json number --jq .number 2>/dev/null; then
+              echo "PR already exists for ${BRANCH}"
+            else
+              echo "::error::Could not create PR. Enable Settings → Actions → Allow GitHub Actions to create and approve pull requests, or add RELEASE_PAT to push main directly."
+              exit 1
+            fi
           fi
-          PR="$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')"
+          PR="$(gh pr view "${BRANCH}" --json number --jq .number)"
           echo "pr_number=${PR}" >> "$GITHUB_OUTPUT"
-          echo "Open PR #${PR} — merge when rust CI passes: ${RUN_URL}"
+          echo "Open PR #${PR} — merge manually when ready: ${RUN_URL}"
 
   build:
     needs: bump

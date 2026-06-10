@@ -24,21 +24,9 @@ function Ok($msg) { Write-Host "OK $msg" -ForegroundColor Green }
 
 function Print-Logo {
   $esc = [char]27
-  $lines = @(
-    '    __         __  __            __  _______ '
-    '   / /_  ___  / /_/ /____  _____/  |/  / __ \'
-    '  / __ \/ _ \/ __/ __/ _ \/ ___/ /|_/ / / / /'
-    ' / /_/ /  __/ /_/ /_/  __/ /  / /  / / /_/ / '
-    '/_.___/\___/\__/\__/\___/_/  /_/  /_/\___\_\ '
-  )
-  $last = $lines.Count - 1
-  for ($i = 0; $i -lt $lines.Count; $i++) {
-    $t = if ($last -eq 0) { 0 } else { $i / $last }
-    $r = [int](31 + (100 - 31) * $t)
-    $g = [int](71 + (145 - 71) * $t)
-    $b = [int](200 + (255 - 200) * $t)
-    Write-Host ("{0}[38;2;{1};{2};{3}m{4}{0}[0m" -f $esc, $r, $g, $b, $lines[$i])
-  }
+  $brand = "${esc}[38;2;31;71;240m"
+  $reset = "${esc}[0m"
+  Write-Host "     better${brand}MQ${reset}"
 }
 
 function Print-Welcome {

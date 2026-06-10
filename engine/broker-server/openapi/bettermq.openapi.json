@@ -3,7 +3,7 @@
   "info": {
     "title": "BetterMQ API",
     "description": "HTTP webhook broker — publish, queues, enqueue, flow control, cron, and DLQ. Authenticate with a panel-generated `sk_local_…` Bearer token.",
-    "version": "0.2.3",
+    "version": "0.2.0",
     "license": {
       "name": "MIT OR Apache-2.0"
     }
