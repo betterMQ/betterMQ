@@ -110,7 +110,19 @@ Delivery is **at-least-once**. Use `idempotency_key` on publish/enqueue/group pu
 
 ## Quick start
 
-### Docker (recommended)
+### Install CLI (recommended)
+
+```bash
+curl -fsSL https://bettermq.com/install | bash
+bettermq serve
+open http://localhost:8080/panel/
+```
+
+**Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -c "irm https://bettermq.com/install.ps1 | iex"`
+
+See [selfhost/README.md](selfhost/README.md) for options, Docker, and building from source.
+
+### Docker
 
 ```bash
 git clone https://github.com/betterMQ/betterMQ.git
