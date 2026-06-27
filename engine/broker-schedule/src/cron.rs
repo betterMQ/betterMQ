@@ -1,5 +1,6 @@
 //! Recurring schedules: cron expression or fixed interval, file-backed.
 
+use crate::persist::{load_json_with_recovery, persist_json_atomic, JsonLoadSource};
 use crate::ScheduledPublishRequest;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
@@ -8,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -109,15 +111,18 @@ fn meta_file_path(data_dir: &Path, name: &str) -> PathBuf {
 impl CronRegistry {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, CronError> {
         let path = meta_file_path(data_dir.as_ref(), "crons.json");
-        let file = if path.exists() {
-            let bytes = std::fs::read(&path)?;
-            serde_json::from_slice(&bytes)?
-        } else {
-            CronFile { jobs: Vec::new() }
-        };
+        let loaded = load_json_with_recovery(&path, || CronFile { jobs: Vec::new() });
+        if loaded.source != JsonLoadSource::Main && loaded.source != JsonLoadSource::Default {
+            info!(
+                file = %path.display(),
+                source = ?loaded.source,
+                count = loaded.value.jobs.len(),
+                "cron registry recovered after metadata read failure"
+            );
+        }
         Ok(Self {
             path,
-            inner: Arc::new(parking_lot::Mutex::new(file)),
+            inner: Arc::new(parking_lot::Mutex::new(loaded.value)),
         })
     }
 
@@ -274,10 +279,9 @@ impl CronRegistry {
 
     fn persist(&self) -> Result<(), CronError> {
         let file = self.inner.lock();
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&*file)?)?;
-        std::fs::rename(tmp, &self.path)?;
-        Ok(())
+        let bytes = serde_json::to_vec_pretty(&*file)?;
+        drop(file);
+        persist_json_atomic(&self.path, &bytes).map_err(CronError::from)
     }
 }
 

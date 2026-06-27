@@ -1,7 +1,9 @@
 //! Large payload blob storage (local FS or S3 payload bucket).
 
 use broker_payload::BlobStore;
-use broker_storage::{open_payload_object_store_from_env, StorageMode};
+#[cfg(feature = "slate")]
+use broker_storage::open_payload_object_store_from_env;
+use broker_storage::StorageMode;
 use std::path::Path;
 
 pub fn open_blob_store(

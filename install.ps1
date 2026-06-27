@@ -1,6 +1,9 @@
-# betterMQ installer for Windows.
+# betterMQ installer for Windows (PowerShell).
 #
 #   powershell -ExecutionPolicy Bypass -c "irm https://bettermq.com/install.ps1 | iex"
+#
+# macOS / Linux / WSL / Git Bash:
+#   curl -fsSL https://bettermq.com/install | bash
 #
 # Downloads the latest bettermq-windows-amd64 binary from GitHub Releases,
 # verifies sha256 (when checksums.txt is published for the release), installs

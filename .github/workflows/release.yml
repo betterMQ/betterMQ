@@ -119,7 +119,7 @@ jobs:
 
           - Bumps Cargo.toml and OpenAPI info.version to ${{ steps.bump.outputs.version }}
           - Tag ${TAG} is pushed; build + GitHub release follow in this workflow
-          - **Merge this PR after rust CI passes** so main matches the release tag"
+          - **Merge this PR** so main matches the release tag"
           EXISTING="$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')"
           if [[ -n "${EXISTING}" ]]; then
             echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
@@ -134,7 +134,7 @@ jobs:
           fi
           PR="$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')"
           echo "pr_number=${PR}" >> "$GITHUB_OUTPUT"
-          echo "Open PR #${PR} — merge when rust CI passes: ${RUN_URL}"
+          echo "Open PR #${PR} — merge when ready: ${RUN_URL}"
 
   build:
     needs: bump

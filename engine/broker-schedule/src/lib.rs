@@ -1,10 +1,12 @@
 //! Delayed enqueue (`delay`) and recurring cron schedules.
 
 mod cron;
+mod persist;
 
 use chrono::Utc;
 pub use cron::{normalize_cron, CronError, CronJob, CronRegistry, ScheduleKind};
 use parking_lot::Mutex;
+use persist::{load_json_with_recovery, persist_json_atomic, JsonLoadSource};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -12,6 +14,7 @@ use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -130,13 +133,16 @@ fn meta_file_path(data_dir: &std::path::Path, name: &str) -> std::path::PathBuf 
 impl ScheduleQueue {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, ScheduleError> {
         let path = meta_file_path(data_dir.as_ref(), "schedule.json");
-        let heap = if path.exists() {
-            let bytes = std::fs::read(&path)?;
-            let items: Vec<HeapItem> = serde_json::from_slice(&bytes)?;
-            items.into_iter().collect()
-        } else {
-            BinaryHeap::new()
-        };
+        let loaded = load_json_with_recovery(&path, Vec::<HeapItem>::new);
+        if loaded.source != JsonLoadSource::Main && loaded.source != JsonLoadSource::Default {
+            info!(
+                file = %path.display(),
+                source = ?loaded.source,
+                count = loaded.value.len(),
+                "schedule queue recovered after metadata read failure"
+            );
+        }
+        let heap = loaded.value.into_iter().collect();
 
         Ok(Self {
             path,
@@ -196,26 +202,56 @@ impl ScheduleQueue {
 
     pub fn pop_due(&self, now_ms: i64) -> Vec<ScheduledPublishRequest> {
         let mut heap = self.heap.lock();
-        let mut due = Vec::new();
+        let mut popped = Vec::new();
         while let Some(top) = heap.peek() {
             if top.deliver_at_ms > now_ms {
                 break;
             }
             let item = heap.pop().expect("peeked");
-            due.push(item.request);
+            popped.push(item);
         }
         drop(heap);
-        let _ = self.persist();
-        due
+
+        if popped.is_empty() {
+            return Vec::new();
+        }
+
+        if let Err(e) = self.persist() {
+            warn!(
+                error = %e,
+                count = popped.len(),
+                "failed to persist schedule after pop_due; re-queued in memory"
+            );
+            let mut heap = self.heap.lock();
+            for item in popped {
+                heap.push(item);
+            }
+            return Vec::new();
+        }
+
+        popped.into_iter().map(|item| item.request).collect()
     }
 
     fn persist(&self) -> Result<(), ScheduleError> {
         let heap = self.heap.lock();
         let items: Vec<_> = heap.iter().cloned().collect();
         drop(heap);
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(&items)?)?;
-        std::fs::rename(tmp, &self.path)?;
-        Ok(())
+        let bytes = serde_json::to_vec(&items)?;
+        persist_json_atomic(&self.path, &bytes).map_err(ScheduleError::from)
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn open_recovers_empty_corrupt_schedule_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("schedule.json");
+        std::fs::write(&path, b"").unwrap();
+        let queue = ScheduleQueue::open(dir.path()).unwrap();
+        assert!(queue.list().is_empty());
     }
 }
