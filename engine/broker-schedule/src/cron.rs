@@ -1,6 +1,8 @@
 //! Recurring schedules: cron expression or fixed interval, file-backed.
 
-use crate::persist::{load_json_with_recovery, persist_json_atomic, JsonLoadSource};
+use crate::persist::{
+    load_json_with_recovery, persist_json_atomic, JsonLoadSource, MetadataLoadError,
+};
 use crate::ScheduledPublishRequest;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
@@ -9,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -24,6 +26,8 @@ pub enum CronError {
     InvalidSchedule(String),
     #[error("cron job not found: {0}")]
     NotFound(Uuid),
+    #[error(transparent)]
+    MetadataLoad(#[from] MetadataLoadError),
 }
 
 /// Either a cron pattern or a fixed interval between runs.
@@ -111,8 +115,11 @@ fn meta_file_path(data_dir: &Path, name: &str) -> PathBuf {
 impl CronRegistry {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, CronError> {
         let path = meta_file_path(data_dir.as_ref(), "crons.json");
-        let loaded = load_json_with_recovery(&path, || CronFile { jobs: Vec::new() });
-        if loaded.source != JsonLoadSource::Main && loaded.source != JsonLoadSource::Default {
+        let loaded = load_json_with_recovery(&path, || CronFile { jobs: Vec::new() })?;
+        if !matches!(
+            loaded.source,
+            JsonLoadSource::Main | JsonLoadSource::Missing
+        ) {
             info!(
                 file = %path.display(),
                 source = ?loaded.source,
@@ -231,11 +238,13 @@ impl CronRegistry {
     /// Jobs that should fire now (not paused, `next_run_at_ms <= now`).
     pub fn pop_due(&self, now_ms: i64) -> Vec<CronJob> {
         let mut file = self.inner.lock();
+        let mut reverts: Vec<(Uuid, Option<i64>, i64)> = Vec::new();
         let mut due = Vec::new();
         for job in &mut file.jobs {
             if job.paused || job.next_run_at_ms > now_ms {
                 continue;
             }
+            reverts.push((job.id, job.last_run_at_ms, job.next_run_at_ms));
             due.push(job.clone());
             job.last_run_at_ms = Some(now_ms);
             if let Ok(next) = next_run_for_job(&job.cron, job.every_seconds, now_ms) {
@@ -243,9 +252,27 @@ impl CronRegistry {
             }
         }
         drop(file);
-        if !due.is_empty() {
-            let _ = self.persist();
+
+        if due.is_empty() {
+            return Vec::new();
         }
+
+        if let Err(e) = self.persist() {
+            warn!(
+                error = %e,
+                count = due.len(),
+                "failed to persist cron registry after pop_due; reverted in memory"
+            );
+            let mut file = self.inner.lock();
+            for (id, last_run_at_ms, next_run_at_ms) in reverts {
+                if let Some(job) = file.jobs.iter_mut().find(|j| j.id == id) {
+                    job.last_run_at_ms = last_run_at_ms;
+                    job.next_run_at_ms = next_run_at_ms;
+                }
+            }
+            return Vec::new();
+        }
+
         due
     }
 

@@ -6,7 +6,7 @@ mod persist;
 use chrono::Utc;
 pub use cron::{normalize_cron, CronError, CronJob, CronRegistry, ScheduleKind};
 use parking_lot::Mutex;
-use persist::{load_json_with_recovery, persist_json_atomic, JsonLoadSource};
+use persist::{load_json_with_recovery, persist_json_atomic, JsonLoadSource, MetadataLoadError};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -25,6 +25,8 @@ pub enum ScheduleError {
     Serde(#[from] serde_json::Error),
     #[error("delayed job not found: {0}")]
     NotFound(Uuid),
+    #[error(transparent)]
+    MetadataLoad(#[from] MetadataLoadError),
 }
 
 fn deserialize_flexible_payload<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -133,8 +135,11 @@ fn meta_file_path(data_dir: &std::path::Path, name: &str) -> std::path::PathBuf 
 impl ScheduleQueue {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, ScheduleError> {
         let path = meta_file_path(data_dir.as_ref(), "schedule.json");
-        let loaded = load_json_with_recovery(&path, Vec::<HeapItem>::new);
-        if loaded.source != JsonLoadSource::Main && loaded.source != JsonLoadSource::Default {
+        let loaded = load_json_with_recovery(&path, Vec::<HeapItem>::new)?;
+        if !matches!(
+            loaded.source,
+            JsonLoadSource::Main | JsonLoadSource::Missing
+        ) {
             info!(
                 file = %path.display(),
                 source = ?loaded.source,
@@ -244,14 +249,28 @@ impl ScheduleQueue {
 #[cfg(test)]
 mod schedule_tests {
     use super::*;
+    use crate::persist::env_test_lock::LOCK;
     use tempfile::tempdir;
 
     #[test]
-    fn open_recovers_empty_corrupt_schedule_json() {
+    fn open_fails_on_empty_corrupt_schedule_json_without_recovery_env() {
+        let _guard = LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("BETTERMQ_METADATA_RECOVER") };
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("schedule.json");
+        std::fs::write(&path, b"").unwrap();
+        assert!(ScheduleQueue::open(dir.path()).is_err());
+    }
+
+    #[test]
+    fn open_recovers_empty_schedule_json_when_recovery_env_set() {
+        let _guard = LOCK.lock().unwrap();
+        unsafe { std::env::set_var("BETTERMQ_METADATA_RECOVER", "empty") };
         let dir = tempdir().unwrap();
         let path = dir.path().join("schedule.json");
         std::fs::write(&path, b"").unwrap();
         let queue = ScheduleQueue::open(dir.path()).unwrap();
+        unsafe { std::env::remove_var("BETTERMQ_METADATA_RECOVER") };
         assert!(queue.list().is_empty());
     }
 }
