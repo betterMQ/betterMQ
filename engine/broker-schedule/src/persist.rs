@@ -280,8 +280,7 @@ mod tests {
         let path = sample_path(dir.path());
         fs::write(&path, b"{broken").unwrap();
         let err = load_json_with_recovery(&path, || Sample { items: vec![] })
-            .err()
-            .expect("expected load to fail");
+            .expect_err("expected load to fail");
         assert_eq!(err.path, path);
         assert!(!path.exists());
         let quarantined: Vec<_> = fs::read_dir(dir.path())

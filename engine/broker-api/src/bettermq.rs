@@ -835,6 +835,7 @@ impl From<ScheduleError> for DelayedApiError {
             ScheduleError::NotFound(id) => DelayedApiError::NotFound(id),
             ScheduleError::Io(e) => DelayedApiError::Internal(e.to_string()),
             ScheduleError::Serde(e) => DelayedApiError::Internal(e.to_string()),
+            ScheduleError::MetadataLoad(e) => DelayedApiError::Internal(e.to_string()),
         }
     }
 }
@@ -1230,6 +1231,7 @@ impl From<CronError> for CronApiError {
             }
             CronError::Io(e) => CronApiError::Internal(e.to_string()),
             CronError::Serde(e) => CronApiError::Internal(e.to_string()),
+            CronError::MetadataLoad(e) => CronApiError::Internal(e.to_string()),
         }
     }
 }
