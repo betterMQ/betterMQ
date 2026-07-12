@@ -26,7 +26,7 @@ function Info($msg) { Write-Host "-> $msg" -ForegroundColor DarkGray }
 function Ok($msg) { Write-Host "OK $msg" -ForegroundColor Green }
 
 function Print-Logo {
-  Write-Host "              betterMQ"
+  Write-Host "              betterMQ" -ForegroundColor DarkBlue
 }
 
 function Print-Welcome {

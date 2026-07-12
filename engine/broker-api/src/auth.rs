@@ -33,8 +33,10 @@ pub async fn require_api_key(
         req.extensions_mut().insert(crate::metering::IngestAuth {
             tenant_id: ctx.tenant_id,
         });
-        req.extensions_mut().insert(ctx);
-        return Ok(next.run(req).await);
+        req.extensions_mut().insert(ctx.clone());
+        // Scope all broker catalog/publish ops to this tenant for the request.
+        let tenant = ctx.tenant_id.to_string();
+        return Ok(broker_partition::scope_tenant(tenant, next.run(req)).await);
     }
 
     if let Some(local) = &state.local_auth {

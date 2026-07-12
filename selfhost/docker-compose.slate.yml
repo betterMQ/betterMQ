@@ -2,19 +2,23 @@
 #
 #   cd selfhost && docker compose -f docker-compose.slate.yml up -d --build
 #   open http://localhost:8080/panel/ → Infrastructure → SlateDB
-#   MinIO: endpoint http://minio:9000  buckets bettermq + bettermq-payloads  (minio / minio12345)
-#   MinIO console: http://localhost:9001
+#   MinIO (internal only): endpoint http://minio:9000  buckets bettermq + bettermq-payloads
+#
+# SECURITY: MinIO ports are NOT published to the host. Override with a compose
+# override file only for local debugging. Change MINIO_ROOT_* for anything beyond
+# a throwaway laptop.
 
 services:
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: minio12345
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
+    # Internal compose network only — do not publish 9000/9001 on untrusted hosts.
+    expose:
+      - "9000"
+      - "9001"
     volumes:
       - minio-data:/data
 
@@ -22,9 +26,12 @@ services:
     image: minio/mc:latest
     depends_on:
       - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
     entrypoint: >
       /bin/sh -c "
-        until mc alias set local http://minio:9000 minio minio12345 2>/dev/null; do sleep 1; done;
+        until mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" 2>/dev/null; do sleep 1; done;
         mc mb --ignore-existing local/bettermq;
         mc mb --ignore-existing local/bettermq-payloads;
         echo buckets ready;
@@ -37,6 +44,10 @@ services:
     image: bettermq:selfhost
     ports:
       - "8080:8080"
+    environment:
+      BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:-}
+      # Optional: require header x-bettermq-setup-token on first panel setup
+      # BETTERMQ_SETUP_TOKEN: ${BETTERMQ_SETUP_TOKEN:-}
     volumes:
       - bettermq-data:/data
     command: ["serve", "--data-dir", "/data"]

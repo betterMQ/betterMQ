@@ -1,5 +1,12 @@
 # BetterMQ
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logos/svg/betterMQ-white.svg">
+    <img src="./docs/assets/logos/svg/betterMQ-brand-logo.svg" alt="betterMQ" width="320">
+  </picture>
+</p>
+
 **Self-hosted HTTP message broker** — enqueue durable jobs, deliver them with signed webhook push. No workers to poll; your app receives HTTP callbacks.
 
 <img width="1774" height="887" alt="image" src="./docs/assets/gh-banner.png" />
@@ -20,7 +27,7 @@ Typical uses:
 - **Fan-out** — one event delivered to multiple destinations (groups)
 - **Rate limiting** — per-key parallelism and delivery rate (flow control)
 
-BetterMQ is **not** a streaming log (Kafka-style) or a pull queue (SQS-style). Messages are removed after successful delivery or DLQ placement.
+BetterMQ is a push queue: messages leave after successful delivery or DLQ placement — not an append-only event log or a long-polling worker queue.
 
 ---
 
@@ -49,7 +56,7 @@ flowchart LR
 5. **Retry** — Configurable retries with fixed or exponential backoff.
 6. **DLQ** — After retries exhaust, a copy lands on `{queue}.__dlq` for inspection.
 
-Delivery is **at-least-once**. Use `idempotency_key` on publish/enqueue/group publish to dedupe accepts.
+Delivery is **at-least-once**. Use `idempotency_key` on publish/enqueue to dedupe accepts.
 
 ---
 
@@ -73,8 +80,11 @@ Delivery is **at-least-once**. Use `idempotency_key` on publish/enqueue/group pu
 
 ### Flow control
 
-- **Flow profiles** — reusable `parallelism`, `rate`, and `period_secs`; attach via `flow_id`
-- **Inline flow** — upsert limits per request without pre-creating a profile
+Set rate and parallelism on publish — no need to pre-create a key.
+
+- **Inline on publish** — `flowControl: { key, parallelism, rate, period }` (also `flow` / `period_secs`); reuses a matching profile or creates one
+- **Flow profiles UI / API** — list, create, delete via `/v1/flows` (profiles appear after inline publish too)
+- **`flow_id`** — optional; attach a pre-created profile instead of inline limits
 - **Runtime admin** — pause, resume, pin, unpin, reset-rate on live lanes
 - **Priority** — `0`–`9` (default `5`); with `parallelism: 1`, higher priority runs first
 
@@ -193,8 +203,11 @@ Interactive reference: **`/docs`** (OpenAPI 3.1 + Scalar).
 | GET | `/v1/auth/config`, `/v1/local-auth/status` | 🔓 |
 | POST | `/v1/local-auth/setup`, `/v1/local-auth/regenerate` | 🔓 |
 | GET | `/v1/infra/join/bootstrap` | 🔓 |
-| POST | `/v1/infra/cluster/register`, `/v1/infra/cluster/test-peer` | 🔓 |
+| POST | `/v1/infra/cluster/register` | 🔓 |
+| POST | `/v1/infra/cluster/test-peer` | 🔑 |
 | All other `/v1/*` routes | 🔑 |
+
+`/internal/v1/*` requires `BETTERMQ_CLUSTER_SECRET` (header `x-bettermq-cluster-secret`). Requests without a matching secret return `401`.
 
 Full route index: [docs/API.md](docs/API.md).
 
@@ -328,7 +341,12 @@ Shared accept shape for **`POST /v1/publish`**, **`POST /v1/enqueue`**, and **`P
   "key": "user-42",
   "body": { "hello": "world" },
   "priority": 8,
-  "flow_id": "660e8400-e29b-41d4-a716-446655440001",
+  "flowControl": {
+    "key": "user-42",
+    "parallelism": 5,
+    "rate": 10,
+    "period": 60
+  },
   "delay": 60000,
   "max_retries": 0,
   "idempotency_key": "job-99",
@@ -338,6 +356,8 @@ Shared accept shape for **`POST /v1/publish`**, **`POST /v1/enqueue`**, and **`P
 }
 ```
 
+`flowControl` (alias `flow`) ensures a flow profile by key: if one already exists with the same `parallelism` / `rate` / `period`, it is reused; otherwise it is created or updated. Profiles show up under **Flows** / `GET /v1/flows`. You can still pass a pre-created `flow_id` instead.
+
 **`POST /v1/enqueue`**
 
 ```json
@@ -346,7 +366,12 @@ Shared accept shape for **`POST /v1/publish`**, **`POST /v1/enqueue`**, and **`P
   "key": "user-42",
   "body": { "task": "send_invoice", "invoice_id": 99 },
   "priority": 8,
-  "flow_id": "660e8400-e29b-41d4-a716-446655440001",
+  "flowControl": {
+    "key": "user-42",
+    "parallelism": 1,
+    "rate": 10,
+    "period": 60
+  },
   "delay": 60000,
   "idempotency_key": "inv-99",
   "sign": true
@@ -446,12 +471,47 @@ Self-host: no batch size cap. Cloud builds cap at 100 messages per request.
 
 → `201` — `MemberResponse` with `member_id`, `group_id`, `name`, `url`, `paused`, `parallelism`, `rate`, `period_secs`, optional `flow_key`.
 
-**`POST /v1/groups/{group_id}/publish`**
+**`PUT /v1/groups/{group_id}`** — pause or rename a group (partial update):
+
+```json
+{ "paused": true }
+```
+
+→ `200` — `{ "group_id": "…", "name": "…", "paused": true }`
+
+When a group is paused, fan-out publish skips **all** members. Resume with `{ "paused": false }`. Optional `name` renames the group.
+
+**`PUT /v1/groups/{group_id}/members/{member_id}`** — pause or update one destination:
+
+```json
+{ "paused": true }
+```
+
+→ `200` — `MemberResponse`. A paused member is skipped during fan-out; other members still receive. Resume with `{ "paused": false }`. Other optional fields: `name`, `url`, `secret`, `parallelism`, `rate`, `period_secs`, `flow_key`.
+
+**`POST /v1/publish`** (URL or group)
+
+Direct URL:
 
 ```json
 {
+  "url": "https://example.com/hook",
+  "secret": "whsec_…",
   "key": "user-42",
   "body": { "event": "invoice.paid" },
+  "delay": 5000,
+  "idempotency_key": "inv-99"
+}
+```
+
+Fan-out group (same options — delay, retries, idempotency):
+
+```json
+{
+  "group_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "key": "user-42",
+  "body": { "event": "invoice.paid" },
+  "delay": 5000,
   "idempotency_key": "inv-99"
 }
 ```
@@ -460,6 +520,8 @@ Self-host: no batch size cap. Cloud builds cap at 100 messages per request.
 
 ```json
 {
+  "queue": "__group.a1b2c3d4-…",
+  "duplicate": false,
   "group_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "accepted": 2,
   "deliveries": [

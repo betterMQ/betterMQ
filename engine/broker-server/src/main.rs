@@ -21,7 +21,7 @@ use chrono::Utc;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::{
-    cors::{Any, CorsLayer},
+    cors::{AllowOrigin, Any, CorsLayer},
     trace::TraceLayer,
 };
 
@@ -349,10 +349,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     spawn_schedule_worker(app_state.clone());
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = build_cors_layer();
 
     let app = router((*app_state).clone());
     if settings.dispatch_fleet {
@@ -384,6 +381,35 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .context("HTTP server exited with error")?;
 
     Ok(())
+}
+
+fn build_cors_layer() -> CorsLayer {
+    // Default: same-origin panel needs no CORS. Set BETTERMQ_CORS_ORIGINS to a
+    // comma-separated allowlist, or `*` only when you intentionally need it.
+    let raw = std::env::var("BETTERMQ_CORS_ORIGINS").unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return CorsLayer::new();
+    }
+    if trimmed == "*" {
+        return CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
+    }
+    let origins: Vec<_> = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if origins.is_empty() {
+        return CorsLayer::new();
+    }
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(Any)
+        .allow_headers(Any)
 }
 
 fn spawn_schedule_worker(state: Arc<AppState>) {

@@ -168,7 +168,10 @@ pub struct ClusterNodeInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct BootstrapQuery {
-    pub token: String,
+    /// Prefer `Authorization: Bearer <join_token>` or `x-bettermq-join-token`.
+    /// Query `token` is accepted for older joiners but should be avoided (logs/referrers).
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,8 +365,7 @@ async fn propagate_membership_to_peers(
                 "{}/internal/v1/cluster/apply-membership",
                 base.trim_end_matches('/')
             );
-            match client
-                .post(&url)
+            match crate::cluster_auth::apply_cluster_secret(client.post(&url))
                 .json(&ClusterMembershipResponse {
                     nodes: nodes.clone(),
                 })
@@ -404,17 +406,18 @@ async fn push_node_url_to_seed(cfg: &BetterMqConfig) -> Result<(), String> {
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    client
-        .post(format!("{seed_url}/internal/v1/cluster/update-node"))
-        .json(&ClusterNodeUpdateRequest {
-            node_name: cfg.node.name.clone(),
-            public_url: cfg.node.public_url.clone(),
-        })
-        .send()
-        .await
-        .map_err(|e| format!("cannot reach seed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("seed rejected node update: {e}"))?;
+    crate::cluster_auth::apply_cluster_secret(
+        client.post(format!("{seed_url}/internal/v1/cluster/update-node")),
+    )
+    .json(&ClusterNodeUpdateRequest {
+        node_name: cfg.node.name.clone(),
+        public_url: cfg.node.public_url.clone(),
+    })
+    .send()
+    .await
+    .map_err(|e| format!("cannot reach seed: {e}"))?
+    .error_for_status()
+    .map_err(|e| format!("seed rejected node update: {e}"))?;
     Ok(())
 }
 
@@ -657,8 +660,40 @@ pub async fn infra_cluster_create(
     }))
 }
 
+fn extract_join_token(
+    headers: &axum::http::HeaderMap,
+    query_token: Option<&str>,
+) -> Result<String, ApiError> {
+    if let Some(auth) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+    {
+        let t = auth.trim();
+        if !t.is_empty() {
+            return Ok(t.to_string());
+        }
+    }
+    if let Some(h) = headers
+        .get("x-bettermq-join-token")
+        .and_then(|v| v.to_str().ok())
+    {
+        let t = h.trim();
+        if !t.is_empty() {
+            return Ok(t.to_string());
+        }
+    }
+    if let Some(t) = query_token.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(t.to_string());
+    }
+    Err(ApiError::BadRequest(
+        "missing join token (use Authorization: Bearer or x-bettermq-join-token)".into(),
+    ))
+}
+
 pub async fn infra_join_bootstrap(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Query(q): Query<BootstrapQuery>,
 ) -> Result<Json<BootstrapResponse>, ApiError> {
     let dir = data_dir(&state);
@@ -667,7 +702,8 @@ pub async fn infra_join_bootstrap(
             "no active join token on this node".into(),
         ));
     };
-    if !validate_join_token(&file, &q.token) {
+    let token = extract_join_token(&headers, q.token.as_deref())?;
+    if !validate_join_token(&file, &token) {
         return Err(ApiError::BadRequest("invalid or expired join token".into()));
     }
     let cfg = load_or_default_config(&state)?;
@@ -777,16 +813,15 @@ pub async fn infra_cluster_join(
     }
     let dir = data_dir(&state);
     let seed = body.seed_url.trim().trim_end_matches('/');
-    let bootstrap_url = format!(
-        "{seed}/v1/infra/join/bootstrap?token={}",
-        urlencoding::encode(&body.join_token)
-    );
+    // Prefer header over query string so join tokens are not written to access logs.
+    let bootstrap_url = format!("{seed}/v1/infra/join/bootstrap");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let bootstrap: BootstrapResponse = client
         .get(&bootstrap_url)
+        .header("x-bettermq-join-token", &body.join_token)
         .send()
         .await
         .map_err(|e| ApiError::BadRequest(format!("cannot reach seed: {e}")))?
@@ -951,10 +986,11 @@ pub async fn infra_cluster_sync(
         .ok_or_else(|| ApiError::BadRequest("no seed node".into()))?;
     let seed_base = seed_url.trim().trim_end_matches('/');
     let client = reqwest::Client::new();
-    let mut nodes: Vec<ClusterNode> = match client
-        .get(format!("{seed_base}/internal/v1/cluster/membership"))
-        .send()
-        .await
+    let mut nodes: Vec<ClusterNode> = match crate::cluster_auth::apply_cluster_secret(
+        client.get(format!("{seed_base}/internal/v1/cluster/membership")),
+    )
+    .send()
+    .await
     {
         Ok(resp) if resp.status().is_success() => resp
             .json::<ClusterMembershipResponse>()
@@ -962,16 +998,17 @@ pub async fn infra_cluster_sync(
             .map(|m| m.nodes)
             .map_err(|e| ApiError::BadRequest(format!("invalid membership response: {e}")))?,
         _ => {
-            let remote: ClusterConfig = client
-                .get(format!("{seed_base}/internal/v1/cluster"))
-                .send()
-                .await
-                .map_err(|e| ApiError::BadRequest(format!("cannot reach seed: {e}")))?
-                .error_for_status()
-                .map_err(|e| ApiError::BadRequest(format!("seed error: {e}")))?
-                .json()
-                .await
-                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            let remote: ClusterConfig = crate::cluster_auth::apply_cluster_secret(
+                client.get(format!("{seed_base}/internal/v1/cluster")),
+            )
+            .send()
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("cannot reach seed: {e}")))?
+            .error_for_status()
+            .map_err(|e| ApiError::BadRequest(format!("seed error: {e}")))?
+            .json()
+            .await
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
             remote
                 .nodes
                 .iter()
@@ -1131,9 +1168,12 @@ pub async fn internal_cluster_update_node(
 pub async fn infra_test_peer(
     Json(body): Json<PeerTestRequest>,
 ) -> Result<Json<PeerTestResponse>, ApiError> {
-    let url = format!("{}/healthz", body.url.trim().trim_end_matches('/'));
+    let base = body.url.trim().trim_end_matches('/');
+    validate_peer_probe_url(base)?;
+    let url = format!("{base}/healthz");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     match client.get(&url).send().await {
@@ -1162,6 +1202,52 @@ pub async fn infra_test_peer(
     }
 }
 
+/// Reject probe URLs that target cloud metadata or obvious link-local addresses.
+fn validate_peer_probe_url(raw: &str) -> Result<(), ApiError> {
+    let parsed =
+        reqwest::Url::parse(raw).map_err(|_| ApiError::BadRequest("invalid peer URL".into()))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(ApiError::BadRequest(
+                "peer URL must be http or https".into(),
+            ))
+        }
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ApiError::BadRequest("peer URL missing host".into()))?
+        .to_ascii_lowercase();
+    if host == "metadata.google.internal"
+        || host == "metadata"
+        || host.ends_with(".metadata.google.internal")
+    {
+        return Err(ApiError::BadRequest("peer URL host is not allowed".into()));
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_blocked_probe_ip(ip) {
+            return Err(ApiError::BadRequest("peer URL host is not allowed".into()));
+        }
+    } else if host == "localhost" || host.ends_with(".localhost") {
+        return Err(ApiError::BadRequest("peer URL host is not allowed".into()));
+    }
+    Ok(())
+}
+
+fn is_blocked_probe_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            // Allow RFC1918 so operators can test LAN peers; block loopback,
+            // link-local (incl. cloud metadata 169.254.169.254), and unspecified.
+            v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
+            // link-local
+        }
+    }
+}
+
 fn io_err(e: impl std::error::Error) -> ApiError {
     ApiError::Broker(broker_partition::BrokerError::Storage(
         broker_storage::LogError::Io(std::io::Error::other(e.to_string())),
@@ -1173,7 +1259,6 @@ pub fn public_infra_routes() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route("/v1/infra/join/bootstrap", get(infra_join_bootstrap))
         .route("/v1/infra/cluster/register", post(infra_cluster_register))
-        .route("/v1/infra/cluster/test-peer", post(infra_test_peer))
 }
 
 pub fn protected_infra_routes() -> axum::Router<std::sync::Arc<AppState>> {
@@ -1187,6 +1272,7 @@ pub fn protected_infra_routes() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/v1/infra/cluster/create", post(infra_cluster_create))
         .route("/v1/infra/cluster/join", post(infra_cluster_join))
         .route("/v1/infra/cluster/sync", post(infra_cluster_sync))
+        .route("/v1/infra/cluster/test-peer", post(infra_test_peer))
         .route(
             "/v1/infra/cluster/remove-node",
             post(infra_cluster_remove_node),

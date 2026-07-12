@@ -116,7 +116,23 @@ impl LocalAuthStore {
     }
 
     /// Apply credentials from cluster seed (same API token works on every node).
+    ///
+    /// - Unconfigured node: write once (join path).
+    /// - Already configured with identical hashes: idempotent no-op.
+    /// - Already configured with different hashes: reject (blocks auth takeover).
     pub fn apply_credentials(&self, creds: &AuthCredentials) -> Result<(), LocalAuthError> {
+        if creds.password_hash.trim().is_empty() || creds.api_key_hash.trim().is_empty() {
+            return Err(LocalAuthError::InvalidToken);
+        }
+        if self.is_configured() {
+            let existing = self.load()?;
+            let same_password = constant_time_eq(&existing.password_hash, &creds.password_hash);
+            let same_api_key = constant_time_eq(&existing.api_key_hash, &creds.api_key_hash);
+            if same_password && same_api_key {
+                return Ok(());
+            }
+            return Err(LocalAuthError::AlreadyConfigured);
+        }
         write_atomic(
             &self.path,
             &Stored {
@@ -185,7 +201,17 @@ fn write_atomic(path: &Path, stored: &Stored) -> Result<(), LocalAuthError> {
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(stored)?;
     fs::write(&tmp, json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
     fs::rename(tmp, path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
@@ -213,5 +239,25 @@ mod tests {
         assert_ne!(t1, t2);
         assert!(!store.verify_token(&t1).unwrap());
         assert!(store.verify_token(&t2).unwrap());
+    }
+
+    #[test]
+    fn apply_credentials_allows_first_write_and_blocks_takeover() {
+        let dir = tempdir().unwrap();
+        let store = LocalAuthStore::open(dir.path()).unwrap();
+        let creds = AuthCredentials {
+            password_hash: "argon2-hash".into(),
+            api_key_hash: "sha256-hash".into(),
+        };
+        store.apply_credentials(&creds).unwrap();
+        store.apply_credentials(&creds).unwrap(); // idempotent
+        let takeover = AuthCredentials {
+            password_hash: "evil-password-hash".into(),
+            api_key_hash: "evil-api-hash".into(),
+        };
+        assert!(matches!(
+            store.apply_credentials(&takeover),
+            Err(LocalAuthError::AlreadyConfigured)
+        ));
     }
 }

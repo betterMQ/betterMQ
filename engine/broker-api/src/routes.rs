@@ -30,6 +30,7 @@ pub(crate) async fn publish(
             }
         }
     }
+    validate_publish_destinations(&req)?;
     if let Some(delay_ms) = req.delay_ms.take() {
         let destination = snapshot_destination(&state, &req).await?;
         let scheduled = state.schedule.schedule(
@@ -87,16 +88,34 @@ pub(crate) async fn create_subscription(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateSubscriptionRequest>,
 ) -> Result<(StatusCode, Json<CreateSubscriptionResponse>), ApiError> {
+    validate_destination_url_str(&req.url)?;
     let resp = state.broker.create_subscription(req)?;
     info!(queue_id = %resp.id, queue = %resp.topic, url = %resp.url, "queue ready");
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-/// Frozen destination for delayed enqueue or publish (queue or inline URL).
+fn validate_destination_url_str(url: &str) -> Result<(), ApiError> {
+    broker_dispatch::validate_destination_url(url).map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
+fn validate_publish_destinations(req: &PublishRequest) -> Result<(), ApiError> {
+    if let Some(url) = req.url.as_deref().filter(|u| !u.trim().is_empty()) {
+        validate_destination_url_str(url)?;
+    }
+    if let Some(dest) = req.destination.as_ref() {
+        validate_destination_url_str(&dest.url)?;
+    }
+    Ok(())
+}
+
+/// Frozen destination for delayed enqueue or publish (queue, inline URL, or snapshot).
 pub(crate) async fn snapshot_destination(
     state: &Arc<AppState>,
     req: &PublishRequest,
 ) -> Result<DestinationSnapshot, ApiError> {
+    if let Some(dest) = req.destination.as_ref() {
+        return Ok(dest.clone());
+    }
     if let (Some(url), Some(secret)) = (req.url.as_ref(), req.secret.as_ref()) {
         return Ok(DestinationSnapshot {
             queue_id: req.queue_id,

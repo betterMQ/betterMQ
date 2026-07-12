@@ -3,13 +3,22 @@
 use broker_dispatch::{DispatchConfig, DispatchEngine};
 use broker_partition::{Broker, BrokerConfig, CreateSubscriptionRequest, PublishRequest};
 use broker_proto::{RetryBackoff, RetryBackoffKind, RetryDefaults};
+use std::sync::Once;
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn allow_wiremock_localhost() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var("BETTERMQ_ALLOW_PRIVATE_DESTINATIONS", "1");
+    });
+}
+
 #[tokio::test]
 async fn failed_delivery_moves_to_dlq_after_retries() {
+    allow_wiremock_localhost();
     let dir = tempdir().unwrap();
     let mut cfg = BrokerConfig::new(dir.path().to_path_buf());
     cfg.retry_defaults = RetryDefaults {

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -16,29 +16,96 @@
   </script>
   <script>
     (() => {
-      try {
-        const stored = localStorage.getItem("themeMode");
-        const dark = stored ? stored === "dark" : true;
-        document.documentElement.classList.toggle("dark", dark);
-      } catch (_) {
-        document.documentElement.classList.add("dark");
+      const KEY = "themeMode";
+      const mq = window.matchMedia("(prefers-color-scheme: dark)");
+
+      function readMode() {
+        try {
+          const stored = localStorage.getItem(KEY);
+          if (stored === "dark" || stored === "light" || stored === "system") return stored;
+        } catch (_) {}
+        return "system";
       }
+
+      function resolveDark(mode) {
+        if (mode === "dark") return true;
+        if (mode === "light") return false;
+        return mq.matches;
+      }
+
+      function applyTheme(mode) {
+        const next = mode === "dark" || mode === "light" || mode === "system" ? mode : "system";
+        document.documentElement.classList.toggle("dark", resolveDark(next));
+        document.documentElement.dataset.themeMode = next;
+        try {
+          localStorage.setItem(KEY, next);
+        } catch (_) {}
+        document.dispatchEvent(new CustomEvent("bettermq:theme-applied", { detail: { mode: next } }));
+      }
+
+      applyTheme(readMode());
+      mq.addEventListener("change", () => {
+        if (readMode() === "system") applyTheme("system");
+      });
+
       document.addEventListener("basecoat:theme", (event) => {
         const mode = event.detail?.mode;
-        const dark =
-          mode === "dark"
-            ? true
-            : mode === "light"
-              ? false
-              : !document.documentElement.classList.contains("dark");
-        document.documentElement.classList.toggle("dark", dark);
-        try {
-          localStorage.setItem("themeMode", dark ? "dark" : "light");
-        } catch (_) {}
+        if (mode === "dark" || mode === "light" || mode === "system") {
+          applyTheme(mode);
+          return;
+        }
+        // Legacy toggle: cycle system → light → dark → system
+        const order = ["system", "light", "dark"];
+        const cur = readMode();
+        applyTheme(order[(order.indexOf(cur) + 1) % order.length]);
+      });
+
+      window.bettermqTheme = { readMode, applyTheme };
+
+      document.addEventListener("DOMContentLoaded", () => {
+        const root = document.getElementById("themeMenu");
+        if (!root) return;
+        const btn = document.getElementById("themeMenuBtn");
+        const panel = root.querySelector(".theme-menu-panel");
+        const items = [...root.querySelectorAll("[data-theme]")];
+
+        function syncUi() {
+          const mode = readMode();
+          items.forEach((el) => {
+            const on = el.dataset.theme === mode;
+            el.classList.toggle("is-active", on);
+            el.setAttribute("aria-checked", on ? "true" : "false");
+          });
+        }
+
+        function setOpen(open) {
+          panel.hidden = !open;
+          btn.setAttribute("aria-expanded", open ? "true" : "false");
+          root.classList.toggle("is-open", open);
+        }
+
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          setOpen(panel.hidden);
+        });
+        items.forEach((el) => {
+          el.addEventListener("click", (e) => {
+            e.stopPropagation();
+            applyTheme(el.dataset.theme);
+            setOpen(false);
+          });
+        });
+        document.addEventListener("click", () => setOpen(false));
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") setOpen(false);
+        });
+        document.addEventListener("bettermq:theme-applied", syncUi);
+        syncUi();
       });
     })();
   </script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/basecoat-css@0.3.11/dist/basecoat.cdn.min.css" />
+  <link rel="icon" href="assets/logos/png/icon/betterMQ-icon-brand.png" type="image/png" />
   <link rel="stylesheet" href="theme.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -46,14 +113,30 @@
   <script src="https://cdn.jsdelivr.net/npm/basecoat-css@0.3.11/dist/js/basecoat.min.js" defer></script>
 </head>
 <body>
-  <div class="app-layout">
-    <aside class="app-sidebar">
+  <div class="app-layout" id="appLayout">
+    <div class="nav-backdrop" id="navBackdrop" hidden></div>
+    <aside class="app-sidebar" id="appSidebar" aria-label="Main navigation">
       <div class="app-sidebar-brand">
-        <div class="brand-mark" aria-hidden="true">MQ</div>
-        <div>
-          <h1>BetterMQ</h1>
-          <span>Webhook broker</span>
+        <div class="brand-copy">
+          <img
+            class="brand-wordmark brand-wordmark-dark"
+            src="assets/logos/svg/betterMQ-white.svg"
+            width="120"
+            height="24"
+            alt="BetterMQ"
+          />
+          <img
+            class="brand-wordmark brand-wordmark-light"
+            src="assets/logos/svg/betterMQ-black.svg"
+            width="120"
+            height="24"
+            alt="BetterMQ"
+          />
+          <span>HTTP message broker</span>
         </div>
+        <button type="button" class="tool-btn nav-close-btn" id="btnCloseNav" aria-label="Close menu" title="Close">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
       </div>
 
       <div class="app-sidebar-section">
@@ -89,6 +172,9 @@
       </div>
 
       <header class="topbar">
+        <button type="button" class="tool-btn nav-open-btn" id="btnOpenNav" aria-label="Open menu" title="Menu" aria-controls="appSidebar" aria-expanded="false">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
         <div id="healthPill" class="health-pill health-checking" title="Broker reachability">
           <span class="health-dot" aria-hidden="true"></span>
           <span id="healthLabel" class="health-label">Checking</span>
@@ -112,10 +198,33 @@
           <button type="button" id="btnRefreshAll" class="tool-btn" title="Refresh all">
             <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
           </button>
-          <button type="button" class="tool-btn" aria-label="Toggle theme" title="Theme" onclick="document.dispatchEvent(new CustomEvent('basecoat:theme'))">
-            <span class="show-in-dark"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2"/></svg></span>
-            <span class="show-in-light"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></span>
-          </button>
+          <div class="theme-menu" id="themeMenu">
+            <button type="button" class="tool-btn" id="themeMenuBtn" aria-label="Theme" title="Theme" aria-haspopup="menu" aria-expanded="false">
+              <span class="theme-ico theme-ico-system" aria-hidden="true">
+                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+              </span>
+              <span class="theme-ico theme-ico-light" aria-hidden="true">
+                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+              </span>
+              <span class="theme-ico theme-ico-dark" aria-hidden="true">
+                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+              </span>
+            </button>
+            <div class="theme-menu-panel" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-theme="system" aria-checked="false">
+                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                System
+              </button>
+              <button type="button" role="menuitemradio" data-theme="light" aria-checked="false">
+                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+                Light
+              </button>
+              <button type="button" role="menuitemradio" data-theme="dark" aria-checked="false">
+                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+                Dark
+              </button>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -302,60 +411,100 @@
                 <h2>Groups</h2>
                 <span class="method-badge">POST</span>
               </div>
-              <p class="page-hero-desc">Fan-out one payload to every active member — each with its own URL, secret, and flow limits.</p>
-              <code class="page-hero-route">/v1/groups/{id}/publish</code>
+              <p class="page-hero-desc">Fan-out one payload to every active member — each with its own URL, secret, and flow limits. Publish via <code>POST /v1/publish</code> with <code>group_id</code>.</p>
+              <code class="page-hero-route">/v1/publish</code>
             </div>
           </div>
 
-          <div class="callout">
-            <div class="callout-body">
-              <p><strong>How groups work</strong> — create a group, add members (webhook destinations), then publish once. BetterMQ delivers to every member in parallel, respecting each member’s rate and parallelism settings.</p>
+          <div class="tabs" id="groupsTabs" data-tabs="groups">
+            <div class="tabs-list" role="tablist" aria-label="Groups workflow">
+              <button type="button" class="tabs-trigger is-active" role="tab" id="tab-groups-list" aria-selected="true" aria-controls="tabpanel-groups-list" data-tab="list">1 · Groups</button>
+              <button type="button" class="tabs-trigger" role="tab" id="tab-groups-members" aria-selected="false" aria-controls="tabpanel-groups-members" data-tab="members">2 · Members</button>
             </div>
-          </div>
 
-          <div class="page-grid-2">
-            <div class="panel-stack">
-              <div class="card">
-                <header><h2>Create group</h2><p>A logical fan-out target (e.g. alerts, billing)</p></header>
-                <section>
-                  <form class="form form-grid" onsubmit="return false">
-                    <div class="sb-field"><label for="grpName">Name</label><input class="sb-input" id="grpName" value="alerts" placeholder="alerts" /></div>
-                  </form>
-                </section>
-                <footer><button type="button" id="btnCreateGroup" class="btn btn-primary">Create group</button></footer>
-              </div>
-              <div class="card">
-                <header class="card-header-row">
-                  <div>
+            <div class="tabs-panel is-active" role="tabpanel" id="tabpanel-groups-list" aria-labelledby="tab-groups-list" data-tab-panel="list">
+              <div class="groups-split">
+                <div class="card">
+                  <header>
+                    <h2>Create group</h2>
+                    <p>Logical fan-out target (e.g. alerts, billing)</p>
+                  </header>
+                  <section>
+                    <form class="form form-grid" onsubmit="return false">
+                      <div class="sb-field">
+                        <label for="grpName">Name</label>
+                        <input class="sb-input" id="grpName" value="alerts" placeholder="alerts" />
+                      </div>
+                    </form>
+                  </section>
+                  <footer>
+                    <button type="button" id="btnCreateGroup" class="btn btn-primary">Create group</button>
+                  </footer>
+                </div>
+                <div class="card">
+                  <header>
                     <h2>Registered</h2>
-                    <p>Groups on this broker</p>
-                  </div>
-                </header>
-                <section class="table-wrap">
-                  <table class="table">
-                    <thead><tr><th>ID</th><th>Name</th><th></th></tr></thead>
-                    <tbody id="groupsBody"></tbody>
-                  </table>
-                </section>
+                    <p>Select a group to manage members</p>
+                  </header>
+                  <section class="table-wrap">
+                    <table class="table">
+                      <thead><tr><th>ID</th><th>Name</th><th></th></tr></thead>
+                      <tbody id="groupsBody"></tbody>
+                    </table>
+                  </section>
+                </div>
               </div>
             </div>
 
-            <div class="panel-stack">
+            <div class="tabs-panel" role="tabpanel" id="tabpanel-groups-members" aria-labelledby="tab-groups-members" data-tab-panel="members" hidden>
               <div class="card">
-                <header><h2>Members</h2><p>Webhook destinations that receive each group publish</p></header>
+                <header>
+                  <h2>Members</h2>
+                  <p>Webhook destinations that receive each group publish</p>
+                </header>
                 <section>
                   <form class="form form-grid form-grid-2" onsubmit="return false">
-                    <div class="sb-field span-2"><label for="grpMemberGroup">Group</label><select id="grpMemberGroup" class="sb-select"><option value="">— select group —</option></select></div>
-                    <div class="sb-field"><label for="grpMemberName">Name</label><input class="sb-input" id="grpMemberName" value="primary" /></div>
-                    <div class="sb-field"><label for="grpMemberSecret">Secret</label><input id="grpMemberSecret" value="whsec_demo" class="sb-input mono" /></div>
-                    <div class="sb-field span-2"><label for="grpMemberUrl">Webhook URL</label><input id="grpMemberUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
-                    <div class="sb-field"><label for="grpMemberParallelism">Parallelism</label><input class="sb-input" id="grpMemberParallelism" type="number" value="1" min="1" /></div>
-                    <div class="sb-field"><label for="grpMemberRate">Rate</label><input class="sb-input" id="grpMemberRate" type="number" value="0" min="0" /><p class="field-hint">0 = unlimited</p></div>
-                    <div class="sb-field"><label for="grpMemberPeriod">Period (s)</label><input class="sb-input" id="grpMemberPeriod" type="number" value="60" min="1" /></div>
+                    <div class="sb-field span-2">
+                      <label for="grpMemberGroup">Group</label>
+                      <select id="grpMemberGroup" class="sb-select"><option value="">— select group —</option></select>
+                    </div>
+                    <div class="sb-field">
+                      <label for="grpMemberName">Name</label>
+                      <input class="sb-input" id="grpMemberName" value="primary" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="grpMemberSecret">Secret</label>
+                      <input id="grpMemberSecret" value="whsec_demo" class="sb-input mono" />
+                    </div>
+                    <div class="sb-field span-2">
+                      <label for="grpMemberUrl">Webhook URL</label>
+                      <input id="grpMemberUrl" value="https://webhook.site" class="sb-input mono text-xs" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="grpMemberParallelism">Parallelism</label>
+                      <input class="sb-input" id="grpMemberParallelism" type="number" value="1" min="1" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="grpMemberRate">Rate</label>
+                      <input class="sb-input" id="grpMemberRate" type="number" value="0" min="0" />
+                      <p class="field-hint">0 = unlimited</p>
+                    </div>
+                    <div class="sb-field">
+                      <label for="grpMemberPeriod">Period (s)</label>
+                      <input class="sb-input" id="grpMemberPeriod" type="number" value="60" min="1" />
+                    </div>
                   </form>
                 </section>
-                <footer><button type="button" id="btnAddGroupMember" class="btn btn-primary">Add member</button></footer>
-                <section class="table-wrap" style="margin-top:1rem">
+                <footer>
+                  <button type="button" id="btnAddGroupMember" class="btn btn-primary">Add member</button>
+                </footer>
+              </div>
+              <div class="card">
+                <header>
+                  <h2>Member list</h2>
+                  <p>Active destinations for the selected group</p>
+                </header>
+                <section class="table-wrap">
                   <table class="table">
                     <thead><tr><th>ID</th><th>Name</th><th>URL</th><th>Limits</th><th></th></tr></thead>
                     <tbody id="groupMembersBody"></tbody>
@@ -363,18 +512,6 @@
                 </section>
               </div>
             </div>
-          </div>
-
-          <div class="card card-accent-top" style="margin-top:1rem">
-            <header><h2>Test publish</h2><p>Send a payload to all members of a group</p></header>
-            <section>
-              <form class="form form-grid form-grid-2 form-panel" onsubmit="return false">
-                <div class="sb-field span-2"><label for="grpPubGroup">Group</label><select id="grpPubGroup" class="sb-select"><option value="">— select group —</option></select></div>
-                <div class="sb-field"><label for="grpPubKey">Key</label><input class="sb-input" id="grpPubKey" value="user-1" /></div>
-                <div class="sb-field span-2"><label for="grpPubBody">Body (JSON)</label><textarea id="grpPubBody" rows="3" class="sb-textarea mono text-xs">{"hello":"group"}</textarea></div>
-              </form>
-            </section>
-            <footer><button type="button" id="btnGroupPublish" class="btn btn-primary">Publish to group</button></footer>
           </div>
         </section>
 
@@ -387,36 +524,101 @@
                 <h2>Publish</h2>
                 <span class="method-badge">POST</span>
               </div>
-              <p class="page-hero-desc">One-off webhook delivery — URL + secret only, pushed immediately. No queue required.</p>
+              <p class="page-hero-desc">Deliver once to a URL, or fan-out to a group.</p>
               <code class="page-hero-route">/v1/publish</code>
-            </div>
-          </div>
-
-          <div class="callout">
-            <div class="callout-body">
-              <p><strong>1:1 publish</strong> — immediate push to a single URL, no rate limits.</p>
-              <p><strong>With flow profile</strong> — set <code>flow_id</code> to apply parallelism / rate limits (create one under <strong>Flows</strong> first). The routing key should match the flow key.</p>
             </div>
           </div>
 
           <div class="card">
             <section>
-              <form class="form form-grid form-grid-2" onsubmit="return false">
-                <div class="sb-field span-2"><label for="pubUrl">Destination URL</label><input id="pubUrl" value="https://webhook.site" class="sb-input mono text-xs" /></div>
-                <div class="sb-field"><label for="pubSecret">Secret</label><input id="pubSecret" value="whsec_demo" class="sb-input mono" /></div>
-                <div class="sb-field"><label for="pubKey">Routing key</label><input class="sb-input" id="pubKey" value="user-1" /><p class="field-hint">Must match flow key when using a profile</p></div>
-                <div class="sb-field"><label for="pubPriority">Priority (0–9)</label><input class="sb-input" id="pubPriority" type="number" value="5" min="0" max="9" /></div>
-                <div class="sb-field"><label for="pubMaxRetries">Max retries</label><input class="sb-input" id="pubMaxRetries" type="number" value="0" min="0" /><p class="field-hint">0 = no retries</p></div>
-                <div class="sb-field"><label for="pubDelay">Delay (ms)</label><input class="sb-input" id="pubDelay" type="number" placeholder="immediate" /></div>
-                <div id="pubRetryBackoffFields" class="span-2 form-grid form-grid-2 hidden" style="grid-column:1/-1">
-                  <div class="sb-field"><label for="pubRetryKind">Backoff</label><select id="pubRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
-                  <div class="sb-field"><label for="pubRetryInitialMs">Delay (ms)</label><input class="sb-input" id="pubRetryInitialMs" type="number" value="500" min="1" /></div>
-                  <div class="sb-field pub-retry-exp"><label for="pubRetryMaxMs">Max delay (ms)</label><input class="sb-input" id="pubRetryMaxMs" type="number" value="30000" min="1" /></div>
-                  <div class="sb-field pub-retry-exp"><label for="pubRetryMultiplier">Multiplier</label><input class="sb-input" id="pubRetryMultiplier" type="number" value="2" min="1" step="0.1" /></div>
+              <form class="form publish-form" onsubmit="return false">
+                <div class="form-section">
+                  <h3 class="form-section-title">Destination</h3>
+                  <div class="form-grid form-grid-2">
+                    <div class="sb-field">
+                      <label for="pubMode">Mode</label>
+                      <select id="pubMode" class="sb-select">
+                        <option value="url">URL (1:1)</option>
+                        <option value="group">Group (fan-out)</option>
+                      </select>
+                    </div>
+                    <div class="sb-field" id="pubSecretWrap">
+                      <label for="pubSecret">Secret</label>
+                      <input id="pubSecret" value="whsec_demo" class="sb-input mono" />
+                    </div>
+                    <div class="sb-field span-2" id="pubUrlWrap">
+                      <label for="pubUrl">URL</label>
+                      <input id="pubUrl" value="https://webhook.site" class="sb-input mono text-xs" />
+                    </div>
+                    <div class="sb-field span-2 hidden" id="pubGroupWrap">
+                      <label for="pubGroupId">Group</label>
+                      <select id="pubGroupId" class="sb-select"><option value="">— select group —</option></select>
+                    </div>
+                  </div>
                 </div>
-                <div class="sb-field"><label for="pubIdempotency">Idempotency</label><input class="sb-input" id="pubIdempotency" /></div>
-                <div class="sb-field"><label for="pubFlowId">Flow profile (optional)</label><input id="pubFlowId" class="sb-input mono text-xs" placeholder="flow_id from Flows page" /></div>
-                <div class="sb-field span-2"><label for="pubBody">Body (JSON)</label><textarea id="pubBody" rows="4" class="sb-textarea mono text-xs">{"hello":"direct"}</textarea></div>
+
+                <div class="form-section">
+                  <h3 class="form-section-title">Message</h3>
+                  <div class="form-grid form-grid-2">
+                    <div class="sb-field">
+                      <label for="pubKey">Routing key</label>
+                      <input class="sb-input" id="pubKey" value="user-1" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="pubPriority">Priority</label>
+                      <input class="sb-input" id="pubPriority" type="number" value="5" min="0" max="9" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="pubMaxRetries">Max retries</label>
+                      <input class="sb-input" id="pubMaxRetries" type="number" value="0" min="0" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="pubDelay">Delay (ms)</label>
+                      <input class="sb-input" id="pubDelay" type="number" placeholder="0 = immediate" />
+                    </div>
+                    <div class="sb-field span-2">
+                      <label for="pubIdempotency">Idempotency key</label>
+                      <input class="sb-input" id="pubIdempotency" placeholder="optional" />
+                    </div>
+                    <div id="pubRetryBackoffFields" class="span-2 form-grid form-grid-2 hidden">
+                      <div class="sb-field"><label for="pubRetryKind">Backoff</label><select id="pubRetryKind" class="sb-select"><option value="exponential">Exponential</option><option value="fixed">Fixed interval</option></select></div>
+                      <div class="sb-field"><label for="pubRetryInitialMs">Initial delay (ms)</label><input class="sb-input" id="pubRetryInitialMs" type="number" value="500" min="1" /></div>
+                      <div class="sb-field pub-retry-exp"><label for="pubRetryMaxMs">Max delay (ms)</label><input class="sb-input" id="pubRetryMaxMs" type="number" value="30000" min="1" /></div>
+                      <div class="sb-field pub-retry-exp"><label for="pubRetryMultiplier">Multiplier</label><input class="sb-input" id="pubRetryMultiplier" type="number" value="2" min="1" step="0.1" /></div>
+                    </div>
+                    <div class="sb-field span-2">
+                      <label for="pubBody">Body (JSON)</label>
+                      <textarea id="pubBody" rows="5" class="sb-textarea mono text-xs">{"hello":"direct"}</textarea>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-section" id="pubFlowWrap">
+                  <h3 class="form-section-title">Flow control <span class="form-section-optional">optional</span></h3>
+                  <p class="form-section-hint">Set limits on this publish — a matching profile is reused, otherwise one is created. Or use an existing profile id.</p>
+                  <div class="form-grid form-grid-2">
+                    <div class="sb-field">
+                      <label for="pubFlowKey">Flow key</label>
+                      <input id="pubFlowKey" class="sb-input" placeholder="defaults to routing key" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="pubFlowParallelism">Parallelism</label>
+                      <input id="pubFlowParallelism" class="sb-input" type="number" min="1" placeholder="1" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="pubFlowRate">Rate</label>
+                      <input id="pubFlowRate" class="sb-input" type="number" min="0" placeholder="0 = unlimited" />
+                    </div>
+                    <div class="sb-field">
+                      <label for="pubFlowPeriod">Period (sec)</label>
+                      <input id="pubFlowPeriod" class="sb-input" type="number" min="1" placeholder="60" />
+                    </div>
+                    <div class="sb-field span-2">
+                      <label for="pubFlowId">Existing flow id</label>
+                      <input id="pubFlowId" class="sb-input mono text-xs" placeholder="UUID from Flows — used only if limits above are empty" />
+                    </div>
+                  </div>
+                </div>
               </form>
             </section>
             <footer><button type="button" id="btnPublish" class="btn btn-primary">Publish</button></footer>
@@ -447,7 +649,7 @@
           <div class="card">
             <header><h2>New message</h2><p>Payload and delivery options</p></header>
             <section>
-              <form class="form form-grid form-grid-2 form-panel" onsubmit="return false">
+              <form class="form form-grid form-grid-2" onsubmit="return false">
                 <div class="sb-field span-2"><label for="enqQueueId">Queue</label><select id="enqQueueId" class="sb-select"><option value="">— create a queue first —</option></select></div>
                 <div class="sb-field"><label for="enqKey">Key</label><input class="sb-input" id="enqKey" value="user-1" /></div>
                 <div class="sb-field"><label for="enqPriority">Priority</label><input class="sb-input" id="enqPriority" type="number" value="5" /></div>
@@ -578,13 +780,19 @@
 
           <div class="card">
             <section>
-              <form class="form form-row" onsubmit="return false">
-                <div class="sb-field" style="flex:1;min-width:12rem">
+              <form class="form dlq-toolbar" onsubmit="return false">
+                <div class="sb-field dlq-source-field">
                   <label for="dlqSource">Source</label>
                   <select id="dlqSource" class="sb-select"><option value="">Loading sources…</option></select>
-                  <p class="field-hint" id="dlqTopicHint"></p>
                 </div>
-                <div class="sb-field field-tight"><label for="dlqLimit">Limit</label><input class="sb-input" id="dlqLimit" type="number" value="20" /></div>
+                <div class="sb-field dlq-topic-field">
+                  <label for="dlqTopicHint">Topic</label>
+                  <input id="dlqTopicHint" class="sb-input mono text-xs" readonly tabindex="-1" placeholder="—" />
+                </div>
+                <div class="sb-field dlq-limit-field">
+                  <label for="dlqLimit">Limit</label>
+                  <input class="sb-input" id="dlqLimit" type="number" value="20" min="1" />
+                </div>
                 <button type="button" id="btnRefreshDlq" class="btn btn-outline">Load</button>
               </form>
             </section>
@@ -592,7 +800,7 @@
           <div class="card">
             <section class="table-wrap">
               <table class="table">
-                <thead><tr><th>Message</th><th>Source</th><th>Destination</th><th>Published</th><th>Body</th><th></th></tr></thead>
+                <thead><tr><th>Message</th><th>Source</th><th>Destination</th><th>Reason</th><th>Published</th><th>Body</th><th></th></tr></thead>
                 <tbody id="dlqBody"></tbody>
               </table>
             </section>
@@ -946,9 +1154,23 @@
         <pre id="modalJson" class="code-block mono"></pre>
       </section>
       <footer class="modal-foot">
-        <button type="button" id="btnModalCopy" class="btn btn-outline">Copy</button>
+        <button type="button" id="btnModalCopy" class="btn btn-outline">
+          <span class="copy-label">Copy</span>
+          <span class="copy-done" aria-hidden="true">Copied</span>
+        </button>
         <button type="button" id="btnModalClose2" class="btn btn-primary">Close</button>
       </footer>
+    </div>
+  </div>
+
+  <div id="confirmBackdrop" class="modal-backdrop confirm-backdrop hidden" role="presentation">
+    <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmDesc">
+      <h3 id="confirmTitle">Are you sure?</h3>
+      <p id="confirmDesc" class="confirm-desc">This action cannot be undone.</p>
+      <div class="confirm-actions">
+        <button type="button" id="btnConfirmCancel" class="btn btn-outline">Cancel</button>
+        <button type="button" id="btnConfirmOk" class="btn btn-destructive">Delete</button>
+      </div>
     </div>
   </div>
 
@@ -976,7 +1198,10 @@
       <h2>Copy your API token</h2>
       <p class="muted text-sm">Shown once. It will not be displayed again. Regenerate from Settings with your password.</p>
       <div class="token-box mono" id="tokenRevealValue"></div>
-      <button type="button" id="btnCopyToken" class="btn btn-outline" style="width:100%;margin-top:0.5rem">Copy</button>
+      <button type="button" id="btnCopyToken" class="btn btn-outline btn-copy" style="width:100%;margin-top:0.5rem">
+        <span class="copy-label">Copy token</span>
+        <span class="copy-done" aria-hidden="true">Copied</span>
+      </button>
       <button type="button" id="btnTokenDone" class="btn btn-primary" style="width:100%;margin-top:0.5rem">I saved it — continue</button>
     </div>
   </div>

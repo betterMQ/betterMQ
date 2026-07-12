@@ -156,6 +156,29 @@ impl FlowProfileRegistry {
         self.create(tenant_id, key, parallelism, rate, period_secs)
     }
 
+    /// Reuse an existing profile when key + limits match; otherwise create
+    /// (missing key) or update (same key, different limits).
+    pub fn ensure_by_key(
+        &self,
+        tenant_id: &str,
+        key: String,
+        parallelism: u32,
+        rate: u32,
+        period_secs: u64,
+    ) -> Result<FlowProfile, FlowProfileError> {
+        let parallelism = parallelism.max(1);
+        let period_secs = period_secs.max(1);
+        if let Some(existing) = self.get_by_key(tenant_id, &key)? {
+            if existing.parallelism == parallelism
+                && existing.rate == rate
+                && existing.period_secs == period_secs
+            {
+                return Ok(existing);
+            }
+        }
+        self.upsert_by_key(tenant_id, key, parallelism, rate, period_secs)
+    }
+
     pub fn get_by_id(
         &self,
         tenant_id: &str,

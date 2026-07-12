@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Limits applied per flow-control key (defaults to message `key` / routing key).
+///
+/// On publish/enqueue this can be sent as `flow` or `flowControl`.
+/// `period` is accepted as an alias for `period_secs`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct FlowSpec {
     /// Grouping key for rate + parallelism.
@@ -14,8 +17,8 @@ pub struct FlowSpec {
     /// Max deliveries started per period. `0` or omit = no rate limit.
     #[serde(default)]
     pub rate: Option<u32>,
-    /// Rate window length in seconds (default 1).
-    #[serde(default)]
+    /// Rate window length in seconds (default 1). Alias: `period`.
+    #[serde(default, alias = "period")]
     pub period_secs: Option<u64>,
 }
 

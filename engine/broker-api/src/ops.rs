@@ -87,7 +87,28 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Rea
     )
 }
 
-pub async fn metrics(State(state): State<Arc<AppState>>) -> Json<MetricsResponse> {
+pub async fn metrics(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<MetricsResponse>, StatusCode> {
+    if let Some(expected) = std::env::var("BETTERMQ_METRICS_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        let ok = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .is_some_and(|got| got == expected)
+            || headers
+                .get("x-bettermq-metrics-token")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|got| got == expected);
+        if !ok {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
     let blocked = state.dispatch.host_blocker().blocked_hosts();
     let cluster_enabled = state.cluster.is_some();
     let healthy_peers = state
@@ -110,7 +131,7 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Json<MetricsResponse
         (Some(rss), Some(limit)) if limit > 0 => Some(((rss * 100) / limit).min(100) as u8),
         _ => None,
     };
-    Json(MetricsResponse {
+    Ok(Json(MetricsResponse {
         blocked_hosts: blocked.len(),
         memory_critical: guard.is_critical(),
         cluster_enabled,
@@ -119,7 +140,7 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Json<MetricsResponse
         memory_limit_mb,
         memory_percent,
         cpu_percent: resources.cpu_percent,
-    })
+    }))
 }
 
 pub async fn list_blocked_hosts(State(state): State<Arc<AppState>>) -> Json<BlockedHostsResponse> {

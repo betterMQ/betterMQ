@@ -31,9 +31,9 @@ TARGET="${1:-latest}"
 
 # --- helpers ----------------------------------------------------------------
 
-# Brand #1f47f0
+# Brand #0535be
 if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
-  C_BRAND=$'\033[38;2;31;71;240m'
+  C_BRAND=$'\033[38;2;5;53;190m'
   C_BOLD=$'\033[1m'
   C_DIM=$'\033[2m'
   C_GREEN=$'\033[32m'
@@ -48,7 +48,7 @@ ok() { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 
 # Wordmark: plain betterMQ, centered over the tagline.
 print_logo() {
-  printf '              betterMQ\n'
+  printf '%s%s              betterMQ%s\n' "$C_BOLD" "$C_BRAND" "$C_RESET"
 }
 
 print_welcome() {

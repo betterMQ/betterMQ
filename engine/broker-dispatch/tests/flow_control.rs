@@ -2,14 +2,23 @@
 
 use broker_dispatch::{DispatchConfig, DispatchEngine};
 use broker_partition::{Broker, BrokerConfig, CreateSubscriptionRequest, PublishRequest};
+use std::sync::Once;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn allow_wiremock_localhost() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var("BETTERMQ_ALLOW_PRIVATE_DESTINATIONS", "1");
+    });
+}
+
 #[tokio::test]
 async fn fifo_parallelism_one_orders_by_priority() {
+    allow_wiremock_localhost();
     let dir = tempdir().unwrap();
     let broker = Broker::open(BrokerConfig::new(dir.path().to_path_buf())).unwrap();
     let dispatch = DispatchEngine::new(
