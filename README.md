@@ -1,16 +1,16 @@
-# BetterMQ
+# betterMQ
 
 **Self-hosted HTTP message broker** — enqueue durable jobs, deliver them with signed webhook push. No workers to poll; your app receives HTTP callbacks.
 
 <img width="1774" height="887" alt="betterMQ — self-hosted HTTP message broker" src="./docs/assets/gh-banner.png" />
 
-[bettermq.com](https://bettermq.com) · [Interactive API docs](https://github.com/betterMQ/betterMQ) (`/docs` when running) · [LLM docs](https://bettermq.com/llms.txt) (full guide: `llm.txt` / `llms.txt`)
+[betterMQ.com](https://betterMQ.com) · [Interactive API docs](https://github.com/betterMQ/betterMQ) (`/docs` when running) · [LLM docs](https://betterMQ.com/llms.txt) (full guide: `llm.txt` / `llms.txt`)
 
 ---
 
-## What is BetterMQ?
+## What is betterMQ?
 
-BetterMQ is an **open-source, push-only message broker**. You send messages over HTTP; BetterMQ stores them durably and **pushes** them to your webhook URLs (like a background job queue with HTTP delivery instead of pull-based workers).
+betterMQ is an **open-source, push-only message broker**. You send messages over HTTP; betterMQ stores them durably and **pushes** them to your webhook URLs (like a background job queue with HTTP delivery instead of pull-based workers).
 
 Typical uses:
 
@@ -20,7 +20,7 @@ Typical uses:
 - **Fan-out** — one event delivered to multiple destinations (groups)
 - **Rate limiting** — per-key parallelism and delivery rate (flow control)
 
-BetterMQ is a push queue: messages leave after successful delivery or DLQ placement — not an append-only event log or a long-polling worker queue.
+betterMQ is a push queue: messages leave after successful delivery or DLQ placement — not an append-only event log or a long-polling worker queue.
 
 ---
 
@@ -29,7 +29,7 @@ BetterMQ is a push queue: messages leave after successful delivery or DLQ placem
 ```mermaid
 flowchart LR
   Client[Your app / curl]
-  API[BetterMQ API]
+  API[betterMQ API]
   WAL[(Durable log)]
   Flow[Flow control]
   Webhook[Your HTTPS endpoint]
@@ -45,7 +45,7 @@ flowchart LR
 1. **Accept** — `POST /v1/enqueue` or `POST /v1/publish` returns `202` after the message is durably stored.
 2. **Snapshot** — For queues, the destination URL and secret are frozen at enqueue time (later queue updates do not affect in-flight jobs).
 3. **Flow control** — Optional rate limits and per-key parallelism before delivery starts.
-4. **Push** — BetterMQ sends your `body` to the destination (optional custom method, headers, HMAC signature).
+4. **Push** — betterMQ sends your `body` to the destination (optional custom method, headers, HMAC signature).
 5. **Retry** — Configurable retries with fixed or exponential backoff.
 6. **DLQ** — After retries exhaust, a copy lands on `{queue}.__dlq` for inspection.
 
@@ -93,7 +93,7 @@ Set rate and parallelism on publish — no need to pre-create a key.
 
 - **Push-only** — no pull/worker API; your endpoint receives HTTP callbacks
 - **curl-style outbound** — optional `method`, `headers`, raw `body`
-- **Webhook signing** — `BetterMQ-Signature` + `BetterMQ-Timestamp` HMAC headers
+- **Webhook signing** — `betterMQ-Signature` + `betterMQ-Timestamp` HMAC headers
 
 ### Operations
 
@@ -107,7 +107,7 @@ Set rate and parallelism on publish — no need to pre-create a key.
 
 - **No usage limits** — full throughput on your hardware
 - **Local auth** — panel password + `sk_local_…` API token (no external account)
-- **Single binary** — `bettermq serve` (Rust)
+- **Single binary** — `betterMQ serve` (Rust)
 
 ---
 
@@ -116,12 +116,12 @@ Set rate and parallelism on publish — no need to pre-create a key.
 ### Install CLI (recommended)
 
 ```bash
-curl -fsSL https://bettermq.com/install | bash
-bettermq serve
+curl -fsSL https://betterMQ.com/install | bash
+betterMQ serve
 open http://localhost:8080/panel/
 ```
 
-**Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -c "irm https://bettermq.com/install.ps1 | iex"`
+**Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -c "irm https://betterMQ.com/install.ps1 | iex"`
 
 See [selfhost/README.md](selfhost/README.md) for options, Docker, and building from source.
 
@@ -129,7 +129,7 @@ See [selfhost/README.md](selfhost/README.md) for options, Docker, and building f
 
 ```bash
 git clone https://github.com/betterMQ/betterMQ.git
-cd BetterMQ/selfhost
+cd betterMQ/selfhost
 docker compose up -d --build
 open http://localhost:8080/panel/
 ```
@@ -144,8 +144,8 @@ See [selfhost/README.md](selfhost/README.md) for Slate + MinIO and multi-node se
 
 ```bash
 cargo build --release -p broker-server
-./target/release/bettermq serve          # default port 8080
-./target/release/bettermq serve -p 9000  # custom port
+./target/release/betterMQ serve          # default port 8080
+./target/release/betterMQ serve -p 9000  # custom port
 ```
 
 Interactive API reference: `http://localhost:8080/docs`
@@ -180,7 +180,7 @@ Endpoints marked **Public** below do not require a Bearer token.
 
 **Retention:** primary queue records are removed after successful push or DLQ move. DLQ entries remain until purged (`DELETE /v1/dlq`) or drained.
 
-**Egress:** destination URLs must be `http`/`https`. Loopback and private LAN hosts are blocked by default; set `BETTERMQ_ALLOW_PRIVATE_DESTINATIONS=1` for local webhooks. Cloud metadata hosts stay blocked.
+**Egress:** destination URLs must be `http`/`https`. Loopback and private LAN hosts are blocked by default; set `betterMQ_ALLOW_PRIVATE_DESTINATIONS=1` for local webhooks. Cloud metadata hosts stay blocked.
 
 ---
 
@@ -194,7 +194,7 @@ Interactive reference: **`/docs`** (OpenAPI 3.1 + Scalar).
 | Method | Path | Auth |
 |--------|------|------|
 | GET | `/healthz`, `/readyz` | 🔓 |
-| GET | `/metrics` | 🔓 (🔑 if `BETTERMQ_METRICS_TOKEN` is set) |
+| GET | `/metrics` | 🔓 (🔑 if `betterMQ_METRICS_TOKEN` is set) |
 | GET | `/docs`, `/api-reference`, `/openapi.json` | 🔓 |
 | GET | `/v1/auth/config`, `/v1/local-auth/status` | 🔓 |
 | POST | `/v1/local-auth/setup`, `/v1/local-auth/regenerate` | 🔓 |
@@ -202,7 +202,7 @@ Interactive reference: **`/docs`** (OpenAPI 3.1 + Scalar).
 | POST | `/v1/infra/cluster/register` | 🔓 |
 | All other `/v1/*` routes | 🔑 |
 
-`/internal/v1/*` requires `BETTERMQ_CLUSTER_SECRET` (header `x-bettermq-cluster-secret`). Requests without a matching secret return `401`.
+`/internal/v1/*` requires `betterMQ_CLUSTER_SECRET` (header `x-betterMQ-cluster-secret`). Requests without a matching secret return `401`.
 
 Interactive reference when the broker is running: **`/docs`** (OpenAPI 3.1 + Scalar).
 
@@ -243,7 +243,7 @@ Most failures return JSON:
 { "ready": true, "cluster_healthy": true, "auth_configured": true }
 ```
 
-**`GET /metrics`** → `200` (optional auth via `BETTERMQ_METRICS_TOKEN`)
+**`GET /metrics`** → `200` (optional auth via `betterMQ_METRICS_TOKEN`)
 
 ```json
 {
@@ -755,13 +755,13 @@ curl -sS -X POST http://localhost:8080/v1/publish \
   }'
 ```
 
-BetterMQ POSTs `{ "task": "send_invoice", "invoice_id": 99 }` to your webhook URL (plus `BetterMQ-Signature` headers when `sign: true`).
+betterMQ POSTs `{ "task": "send_invoice", "invoice_id": 99 }` to your webhook URL (plus `betterMQ-Signature` headers when `sign: true`).
 
 ---
 
 ## Retry policy
 
-Resolution order: **request** → **queue defaults** → **`dispatch.retry` in `bettermq.json`**.
+Resolution order: **request** → **queue defaults** → **`dispatch.retry` in `betterMQ.json`**.
 
 ```json
 {
@@ -783,7 +783,7 @@ Resolution order: **request** → **queue defaults** → **`dispatch.retry` in `
 
 | Path | Purpose |
 |------|---------|
-| [`engine/`](engine/) | Rust workspace — `bettermq` server binary and crates |
+| [`engine/`](engine/) | Rust workspace — `betterMQ` server binary and crates |
 | [`selfhost/`](selfhost/) | Docker Compose, self-host deployment |
 | [`docs/`](docs/) | Logos and GitHub banner assets |
 
