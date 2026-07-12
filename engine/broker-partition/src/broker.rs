@@ -665,7 +665,7 @@ impl Broker {
             .config
             .data_dir
             .join("partitions")
-            .join(&self.tenant());
+            .join(self.tenant());
         let mut topics = Vec::new();
         let Ok(entries) = std::fs::read_dir(&tenant_dir) else {
             return Ok(topics);
