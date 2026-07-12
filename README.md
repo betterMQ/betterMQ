@@ -1,15 +1,8 @@
 # BetterMQ
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logos/svg/betterMQ-white.svg">
-    <img src="./docs/assets/logos/svg/betterMQ-brand-logo.svg" alt="betterMQ" width="320">
-  </picture>
-</p>
-
 **Self-hosted HTTP message broker** — enqueue durable jobs, deliver them with signed webhook push. No workers to poll; your app receives HTTP callbacks.
 
-<img width="1774" height="887" alt="image" src="./docs/assets/gh-banner.png" />
+<img width="1774" height="887" alt="betterMQ — self-hosted HTTP message broker" src="./docs/assets/gh-banner.png" />
 
 [bettermq.com](https://bettermq.com) · [Interactive API docs](https://github.com/betterMQ/betterMQ) (`/docs` when running) · [LLM docs](https://bettermq.com/llms.txt) (full guide: `llm.txt` / `llms.txt`)
 
@@ -64,11 +57,11 @@ Delivery is **at-least-once**. Use `idempotency_key` on publish/enqueue to dedup
 
 ### Messaging
 
-- **Named queues** — register a queue name → fixed HTTPS destination URL + signing secret
+- **Named queues** — register a queue name → http(s) destination URL + signing secret
 - **Enqueue** — add jobs to a queue by `queue_id` (preferred) or name
 - **1:1 publish** — one-off delivery to any URL without creating a queue
-- **Groups (fan-out)** — one publish delivers to many member webhooks, each with its own limits
-- **Batch ingest** — up to 100 messages per `POST /v1/enqueue/batch`
+- **Groups (fan-out)** — `POST /v1/publish` with `group_id` delivers to every member webhook
+- **Batch ingest** — `POST /v1/enqueue/batch` (self-host: uncapped; cloud SaaS: max 100)
 - **Gateway enqueue** — same body as batch; for stateless edge gateways
 
 ### Scheduling
@@ -176,16 +169,18 @@ Endpoints marked **Public** below do not require a Bearer token.
 
 | Term | Meaning |
 |------|---------|
-| **queue** | Named destination: `name` + HTTPS URL + HMAC secret |
+| **queue** | Named destination: `name` + http(s) URL + HMAC secret |
 | **queue_id** | Stable UUID — preferred when enqueuing |
-| **publish** | One-off job to an arbitrary URL (no queue registration) |
+| **publish** | One-off job to a URL **or** fan-out to a `group_id` |
 | **enqueue** | Job on a registered queue; destination URL snapshotted at accept time |
-| **flow profile** | Rate / parallelism limits; referenced by `flow_id` |
+| **flow profile** | Rate / parallelism limits; referenced by `flow_id` or inline `flowControl` |
 | **key** | Per-message identity; default flow-control grouping key |
 | **delivery** | `{ "shard", "seq" }` — internal ack coordinates |
-| **DLQ** | `{queue}.__dlq` — failed push copies |
+| **DLQ** | `{queue}.__dlq` — failed push copies (purge with `DELETE /v1/dlq`) |
 
-**Retention:** primary queue records are removed after successful push or DLQ move. DLQ entries remain until you drain or export them.
+**Retention:** primary queue records are removed after successful push or DLQ move. DLQ entries remain until purged (`DELETE /v1/dlq`) or drained.
+
+**Egress:** destination URLs must be `http`/`https`. Loopback and private LAN hosts are blocked by default; set `BETTERMQ_ALLOW_PRIVATE_DESTINATIONS=1` for local webhooks. Cloud metadata hosts stay blocked.
 
 ---
 
@@ -198,18 +193,18 @@ Interactive reference: **`/docs`** (OpenAPI 3.1 + Scalar).
 
 | Method | Path | Auth |
 |--------|------|------|
-| GET | `/healthz`, `/readyz`, `/metrics` | 🔓 |
+| GET | `/healthz`, `/readyz` | 🔓 |
+| GET | `/metrics` | 🔓 (🔑 if `BETTERMQ_METRICS_TOKEN` is set) |
 | GET | `/docs`, `/api-reference`, `/openapi.json` | 🔓 |
 | GET | `/v1/auth/config`, `/v1/local-auth/status` | 🔓 |
 | POST | `/v1/local-auth/setup`, `/v1/local-auth/regenerate` | 🔓 |
 | GET | `/v1/infra/join/bootstrap` | 🔓 |
 | POST | `/v1/infra/cluster/register` | 🔓 |
-| POST | `/v1/infra/cluster/test-peer` | 🔑 |
 | All other `/v1/*` routes | 🔑 |
 
 `/internal/v1/*` requires `BETTERMQ_CLUSTER_SECRET` (header `x-bettermq-cluster-secret`). Requests without a matching secret return `401`.
 
-Full route index: [docs/API.md](docs/API.md).
+Interactive reference when the broker is running: **`/docs`** (OpenAPI 3.1 + Scalar).
 
 ---
 
@@ -225,8 +220,10 @@ Most failures return JSON:
 
 | Status | When |
 |--------|------|
-| `400` | Bad request / validation |
-| `404` | Queue, flow, cron, group, or lane not found |
+| `400` | Bad request / validation (incl. missing/invalid Bearer, unknown `group_id` on publish) |
+| `401` | Metrics token or cluster secret mismatch |
+| `404` | Queue, flow, cron, group, member, lane, or delayed job not found (route-dependent) |
+| `409` | Duplicate group name |
 | `503` | Replication / readiness failure |
 | `500` | Internal / storage errors |
 
@@ -237,7 +234,7 @@ Most failures return JSON:
 **`GET /healthz`** → `200`
 
 ```json
-{ "status": "ok", "version": "0.2.2", "protocol": 1 }
+{ "status": "ok", "version": "0.4.0", "protocol": 1 }
 ```
 
 **`GET /readyz`** → `200` when ready, `503` when not
@@ -246,7 +243,7 @@ Most failures return JSON:
 { "ready": true, "cluster_healthy": true, "auth_configured": true }
 ```
 
-**`GET /metrics`** → `200`
+**`GET /metrics`** → `200` (optional auth via `BETTERMQ_METRICS_TOKEN`)
 
 ```json
 {
@@ -256,6 +253,8 @@ Most failures return JSON:
   "healthy_peers": 1
 }
 ```
+
+Optional fields when process sampling is available: `rss_mb`, `memory_limit_mb`, `memory_percent`, `cpu_percent`.
 
 ---
 
@@ -332,7 +331,7 @@ Most failures return JSON:
 
 Shared accept shape for **`POST /v1/publish`**, **`POST /v1/enqueue`**, and **`POST /v1/queues/{queue_id}/enqueue`**.
 
-**`POST /v1/publish`**
+**`POST /v1/publish`** — provide either `url` + `secret` (1:1) or `group_id` (fan-out), not both. `body` is required.
 
 ```json
 {
@@ -349,6 +348,12 @@ Shared accept shape for **`POST /v1/publish`**, **`POST /v1/enqueue`**, and **`P
   },
   "delay": 60000,
   "max_retries": 0,
+  "retry_backoff": {
+    "kind": "exponential",
+    "initialMs": 1000,
+    "maxMs": 60000,
+    "multiplier": 2
+  },
   "idempotency_key": "job-99",
   "method": "POST",
   "headers": { "Content-Type": "application/json" },
@@ -356,7 +361,7 @@ Shared accept shape for **`POST /v1/publish`**, **`POST /v1/enqueue`**, and **`P
 }
 ```
 
-`flowControl` (alias `flow`) ensures a flow profile by key: if one already exists with the same `parallelism` / `rate` / `period`, it is reused; otherwise it is created or updated. Profiles show up under **Flows** / `GET /v1/flows`. You can still pass a pre-created `flow_id` instead.
+`flowControl` (alias `flow`) ensures a flow profile by key: if one already exists with the same `parallelism` / `rate` / `period`, it is reused; otherwise it is created or updated. Profiles show up under **Flows** / `GET /v1/flows`. You can still pass a pre-created `flow_id` instead. **Inline flow / `flow_id` are for URL publish only** — not with `group_id` (members carry their own limits).
 
 **`POST /v1/enqueue`**
 
@@ -504,7 +509,7 @@ Direct URL:
 }
 ```
 
-Fan-out group (same options — delay, retries, idempotency):
+Fan-out group (same endpoint — delay, retries, idempotency, method/headers/sign; **do not** send `flow_id` / `flowControl`):
 
 ```json
 {
@@ -545,9 +550,13 @@ Fan-out group (same options — delay, retries, idempotency):
 }
 ```
 
+**`DELETE /v1/groups/{group_id}`** / **`DELETE /v1/groups/{group_id}/members/{member_id}`** → `200` (deleted record).
+
 ---
 
 ### Flow profiles & runtime
+
+Lane runtime routes require **exactly one** owner query: `queue_id` (alias `endpoint_id`), `flow_id`, or `group_member_id`. Missing → `400`.
 
 **`POST /v1/flows`**
 
@@ -566,6 +575,10 @@ Fan-out group (same options — delay, retries, idempotency):
   "period_secs": 60
 }
 ```
+
+**`GET /v1/flows`** → `200` — `{ "flows": [ FlowProfileResponse… ] }`
+
+**`DELETE /v1/flows/{flow_id}`** → `200` — deleted `FlowProfileResponse`.
 
 **`GET /v1/flow/{key}?queue_id=…`** → `200`
 
@@ -586,15 +599,15 @@ Fan-out group (same options — delay, retries, idempotency):
 }
 ```
 
-**`PUT /v1/flow/{key}?queue_id=…`** — body: `{ "parallelism", "rate", "period_secs" }` → `200` (`FlowProfileResponse`).
+**`PUT /v1/flow/{key}?queue_id=…`** — body: `{ "parallelism", "rate", "period_secs" }` (no `key` in body) → `200` (`FlowProfileResponse`).
 
-**`POST /v1/flow/{key}/pause|resume|reset-rate`** → `204` (no body).
+**`POST /v1/flow/{key}/pause|resume|reset-rate?queue_id=…`** → `204` (no body).
 
-**`POST /v1/flow/{key}/pin`** — `{ "parallelism": 1, "rate": 10, "period_secs": 60 }` → `204`.
+**`POST /v1/flow/{key}/pin?queue_id=…`** — `{ "parallelism": 1, "rate": 10, "period_secs": 60 }` → `204`.
+
+**`POST /v1/flow/{key}/unpin?queue_id=…`** — `{ "parallelism": true, "rate": true }` → `204`.
 
 **`GET /v1/flow/global`** → `200` — `{ "parallelism_max": null, "parallelism_count": 4 }`.
-
-Query `queue_id`, `flow_id`, or `group_member_id` to select the lane owner.
 
 ---
 
@@ -631,6 +644,8 @@ Interval schedules use `"schedule_type": "interval"` and `"every_seconds": 30` (
 
 **`POST /v1/crons/{cron_id}/pause`** / **`resume`** → `200` (`CronResponse`).
 
+**`GET /v1/crons/{cron_id}`** / **`DELETE /v1/crons/{cron_id}`** → `200` (`CronResponse`).
+
 **`GET /v1/delayed`** → `200`
 
 ```json
@@ -653,7 +668,9 @@ Interval schedules use `"schedule_type": "interval"` and `"every_seconds": 30` (
 
 ### DLQ
 
-**`GET /v1/dlq?queue=jobs&limit=10`** → `200` (default `limit` = 10)
+**`GET /v1/dlq/sources`** → `200` — buckets for named queues, direct publish, and group members (`queue` / `direct` / `group_member`).
+
+**`GET /v1/dlq?queue=jobs&limit=10`** → `200` (default `limit` = 10). Pass `dlq_topic=` instead of `queue=` for non-queue DLQs (e.g. `__direct.__dlq`).
 
 ```json
 {
@@ -664,11 +681,16 @@ Interval schedules use `"schedule_type": "interval"` and `"every_seconds": 30` (
       "message_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
       "key": "user-42",
       "body": "{\"task\":\"failed\"}",
-      "published_at_ms": 1717189200000
+      "published_at_ms": 1717189200000,
+      "partition": 0,
+      "offset": 42,
+      "reason": "retries exhausted"
     }
   ]
 }
 ```
+
+**`DELETE /v1/dlq?dlq_topic=jobs.__dlq&partition=0&offset=42`** → `204` (purge one message).
 
 ---
 
@@ -683,6 +705,8 @@ Interval schedules use `"schedule_type": "interval"` and `"every_seconds": 30` (
   ]
 }
 ```
+
+**`POST /v1/destinations/block`** `{ "host": "https://api.example.com:443", "duration_ms": 1800000 }` → `200` `{ "host": "…", "remaining_ms": … }` (default duration 30 minutes).
 
 **`POST /v1/destinations/unblock`** `{ "host": "https://api.example.com:443" }` → `200` (empty body).
 
@@ -718,6 +742,17 @@ curl -sS -X POST http://localhost:8080/v1/enqueue \
     "sign": true
   }'
 # → {"message_id":"7c9e6679-…","queue":"jobs","duplicate":false,"delivery":{"shard":0,"seq":12}}
+
+# 3. Fan-out publish → 202 (create group + members first)
+curl -sS -X POST http://localhost:8080/v1/publish \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "key": "user-42",
+    "body": { "event": "invoice.paid" },
+    "idempotency_key": "inv-99"
+  }'
 ```
 
 BetterMQ POSTs `{ "task": "send_invoice", "invoice_id": 99 }` to your webhook URL (plus `BetterMQ-Signature` headers when `sign: true`).
@@ -750,9 +785,9 @@ Resolution order: **request** → **queue defaults** → **`dispatch.retry` in `
 |------|---------|
 | [`engine/`](engine/) | Rust workspace — `bettermq` server binary and crates |
 | [`selfhost/`](selfhost/) | Docker Compose, self-host deployment |
-| [`docs/`](docs/) | Architecture, API details, operations |
+| [`docs/`](docs/) | Logos and GitHub banner assets |
 
-Deeper API examples and architecture notes: [docs/API.md](docs/API.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Full HTTP reference: run the broker and open **`/docs`** (OpenAPI + Scalar).
 
 ---
 
