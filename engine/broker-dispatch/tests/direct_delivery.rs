@@ -2,13 +2,23 @@
 
 use broker_dispatch::{DispatchConfig, DispatchEngine};
 use broker_partition::{Broker, BrokerConfig, PublishRequest, DIRECT_TOPIC};
+use std::sync::Once;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn allow_wiremock_localhost() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // Wiremock binds to 127.0.0.1; egress blocks loopback unless opted in.
+        std::env::set_var("BETTERMQ_ALLOW_PRIVATE_DESTINATIONS", "1");
+    });
+}
+
 #[tokio::test]
 async fn direct_publish_delivers_without_flow_delay() {
+    allow_wiremock_localhost();
     let dir = tempdir().unwrap();
     let broker = Broker::open(BrokerConfig::new(dir.path().to_path_buf())).unwrap();
     let dispatch = DispatchEngine::new(
