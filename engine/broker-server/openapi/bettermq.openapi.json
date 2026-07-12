@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "BetterMQ API",
-    "description": "HTTP message broker \u2014 publish, queues, enqueue, flow control, cron, and DLQ. Authenticate with a panel-generated `sk_local_\u2026` Bearer token.",
-    "version": "0.3.0",
+    "description": "HTTP message broker — publish, queues, enqueue, flow control, cron, and DLQ. Authenticate with a panel-generated `sk_local_…` Bearer token.",
+    "version": "0.4.0",
     "license": {
       "name": "MIT OR Apache-2.0"
     }
@@ -76,7 +76,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "API token (`Authorization: Bearer sk_local_\u2026`)"
+        "description": "API token (`Authorization: Bearer sk_local_…`)"
       }
     },
     "schemas": {
@@ -144,7 +144,7 @@
           },
           "flowControl": {
             "$ref": "#/components/schemas/FlowControlBody",
-            "description": "Alias for flow \u2014 ensure/reuse profile by key on publish"
+            "description": "Alias for flow — ensure/reuse profile by key on publish"
           },
           "delay": {
             "type": "integer",
@@ -746,7 +746,7 @@
           },
           "reason": {
             "type": "string",
-            "description": "Why the message was moved to the DLQ (HTTP status, transport error, retries exhausted, \u2026)"
+            "description": "Why the message was moved to the DLQ (HTTP status, transport error, retries exhausted, …)"
           },
           "partition": {
             "type": "integer",
@@ -1698,7 +1698,7 @@
           },
           "secretKey": {
             "type": "string",
-            "description": "Send \u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 to keep the existing secret"
+            "description": "Send •••••••• to keep the existing secret"
           },
           "region": {
             "type": "string",
@@ -1733,7 +1733,7 @@
           },
           "secretKey": {
             "type": "string",
-            "description": "Send \u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 to keep the existing secret"
+            "description": "Send •••••••• to keep the existing secret"
           },
           "region": {
             "type": "string",
@@ -2318,7 +2318,7 @@
         ],
         "operationId": "publishGet",
         "summary": "Publish via GET (destination in path)",
-        "description": "Axum matches `{*destination}` \u2014 multi-segment URL-encoded paths are supported. Deprecated: query `secret` leaks via logs/Referer. Prefer POST /v1/publish. Query secrets require BETTERMQ_ALLOW_QUERY_SECRET=1.",
+        "description": "Axum matches `{*destination}` — multi-segment URL-encoded paths are supported. Deprecated: query `secret` leaks via logs/Referer. Prefer POST /v1/publish. Query secrets require BETTERMQ_ALLOW_QUERY_SECRET=1.",
         "parameters": [
           {
             "name": "destination",
@@ -3399,7 +3399,7 @@
           {
             "name": "queue",
             "in": "query",
-            "description": "Primary queue name (`jobs` \u2192 `jobs.__dlq`).",
+            "description": "Primary queue name (`jobs` → `jobs.__dlq`).",
             "schema": {
               "type": "string"
             }
@@ -3407,7 +3407,7 @@
           {
             "name": "dlq_topic",
             "in": "query",
-            "description": "Full DLQ topic (`__direct.__dlq`, `__group.{id}.{member}.__dlq`, \u2026). Use when not a named queue.",
+            "description": "Full DLQ topic (`__direct.__dlq`, `__group.{id}.{member}.__dlq`, …). Use when not a named queue.",
             "schema": {
               "type": "string"
             }
@@ -3937,7 +3937,7 @@
           "Ops"
         ],
         "operationId": "blockHost",
-        "summary": "Operator override \u2014 manually block a destination host",
+        "summary": "Operator override — manually block a destination host",
         "requestBody": {
           "required": true,
           "content": {
@@ -3968,7 +3968,7 @@
           "Ops"
         ],
         "operationId": "unblockHost",
-        "summary": "Operator override \u2014 unblock a host",
+        "summary": "Operator override — unblock a host",
         "requestBody": {
           "required": true,
           "content": {
@@ -4036,7 +4036,7 @@
           "Auth"
         ],
         "operationId": "localAuthSetup",
-        "summary": "First-time local auth setup \u2014 returns API token once",
+        "summary": "First-time local auth setup — returns API token once",
         "security": [],
         "parameters": [
           {
@@ -4112,7 +4112,7 @@
         "operationId": "infraJoinBootstrap",
         "summary": "Bootstrap cluster membership for a joining node",
         "security": [],
-        "description": "Auth via Authorization: Bearer <join_token>, header x-bettermq-join-token, or query token (avoid query \u2014 logs/referrers).",
+        "description": "Auth via Authorization: Bearer <join_token>, header x-bettermq-join-token, or query token (avoid query — logs/referrers).",
         "parameters": [
           {
             "name": "token",
