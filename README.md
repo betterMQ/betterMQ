@@ -1,15 +1,8 @@
 # BetterMQ
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logos/svg/betterMQ-white.svg">
-    <img src="./docs/assets/logos/svg/betterMQ-brand-logo.svg" alt="betterMQ" width="320">
-  </picture>
-</p>
-
 **Self-hosted HTTP message broker** — enqueue durable jobs, deliver them with signed webhook push. No workers to poll; your app receives HTTP callbacks.
 
-<img width="1774" height="887" alt="image" src="./docs/assets/gh-banner.png" />
+<img width="1774" height="887" alt="betterMQ — self-hosted HTTP message broker" src="./docs/assets/gh-banner.png" />
 
 [bettermq.com](https://bettermq.com) · [Interactive API docs](https://github.com/betterMQ/betterMQ) (`/docs` when running) · [LLM docs](https://bettermq.com/llms.txt) (full guide: `llm.txt` / `llms.txt`)
 
