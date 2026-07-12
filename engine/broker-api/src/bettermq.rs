@@ -504,14 +504,14 @@ async fn publish_to_group(
         #[cfg(feature = "cloud")]
         let (_status, Json(inner)) = publish(
             State(state.clone()),
-            ingest.clone(),
+            ingest,
             plan.clone(),
             Json(member_req),
         )
         .await?;
         #[cfg(not(feature = "cloud"))]
         let (_status, Json(inner)) =
-            publish(State(state.clone()), ingest.clone(), Json(member_req)).await?;
+            publish(State(state.clone()), ingest, Json(member_req)).await?;
         deliveries.push(to_group_delivery_ref(member.id, &inner));
     }
 
