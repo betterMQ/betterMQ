@@ -25,10 +25,10 @@ pub use broker::{
     DestinationSnapshot, PublishRequest, PublishResponse, ScheduledInfo, DEFAULT_PARTITIONS,
     DEFAULT_TENANT,
 };
-pub use tenant_scope::{effective_tenant, scope_tenant};
 pub use flows::{FlowProfile, FlowProfileError, FlowProfileRegistry};
 pub use groups::{DispatchGroup, GroupError, GroupMember, GroupRegistry};
 pub use subscriptions::{Subscription, SubscriptionRegistry};
+pub use tenant_scope::{effective_tenant, scope_tenant};
 pub use topic::{
     dlq_topic, group_member_dlq_topic, group_topic, is_dlq_topic, is_group_topic, partition_for,
     DIRECT_TOPIC,

@@ -1204,11 +1204,15 @@ pub async fn infra_test_peer(
 
 /// Reject probe URLs that target cloud metadata or obvious link-local addresses.
 fn validate_peer_probe_url(raw: &str) -> Result<(), ApiError> {
-    let parsed = reqwest::Url::parse(raw)
-        .map_err(|_| ApiError::BadRequest("invalid peer URL".into()))?;
+    let parsed =
+        reqwest::Url::parse(raw).map_err(|_| ApiError::BadRequest("invalid peer URL".into()))?;
     match parsed.scheme() {
         "http" | "https" => {}
-        _ => return Err(ApiError::BadRequest("peer URL must be http or https".into())),
+        _ => {
+            return Err(ApiError::BadRequest(
+                "peer URL must be http or https".into(),
+            ))
+        }
     }
     let host = parsed
         .host_str()
@@ -1238,9 +1242,8 @@ fn is_blocked_probe_ip(ip: std::net::IpAddr) -> bool {
             v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
         }
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
+            v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
+            // link-local
         }
     }
 }

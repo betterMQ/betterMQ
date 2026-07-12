@@ -95,8 +95,7 @@ pub(crate) async fn create_subscription(
 }
 
 fn validate_destination_url_str(url: &str) -> Result<(), ApiError> {
-    broker_dispatch::validate_destination_url(url)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))
+    broker_dispatch::validate_destination_url(url).map_err(|e| ApiError::BadRequest(e.to_string()))
 }
 
 fn validate_publish_destinations(req: &PublishRequest) -> Result<(), ApiError> {

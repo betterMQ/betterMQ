@@ -47,10 +47,7 @@ pub fn print(settings: &ResolvedServeSettings, storage: StorageMode) {
 }
 
 fn print_logo(out: &mut impl Write) {
-    let _ = writeln!(
-        out,
-        "  {BOLD}{BRAND}            betterMQ{RESET}"
-    );
+    let _ = writeln!(out, "  {BOLD}{BRAND}            betterMQ{RESET}");
 }
 
 fn public_base_url(listen: &str) -> String {

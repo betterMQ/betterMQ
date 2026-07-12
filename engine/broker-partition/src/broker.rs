@@ -225,7 +225,6 @@ struct BrokerInner {
 }
 
 impl Broker {
-
     /// Active tenant for this call (request-scoped in cloud, else config default).
     pub fn tenant(&self) -> String {
         crate::tenant_scope::effective_tenant(&self.inner.config.tenant_id).into_owned()
@@ -322,13 +321,10 @@ impl Broker {
         rate: u32,
         period_secs: u64,
     ) -> Result<crate::flows::FlowProfile, BrokerError> {
-        Ok(self.inner.flows.create(
-            &self.tenant(),
-            key,
-            parallelism,
-            rate,
-            period_secs,
-        )?)
+        Ok(self
+            .inner
+            .flows
+            .create(&self.tenant(), key, parallelism, rate, period_secs)?)
     }
 
     pub fn upsert_flow_profile_by_key(
@@ -338,13 +334,10 @@ impl Broker {
         rate: u32,
         period_secs: u64,
     ) -> Result<crate::flows::FlowProfile, BrokerError> {
-        Ok(self.inner.flows.upsert_by_key(
-            &self.tenant(),
-            key,
-            parallelism,
-            rate,
-            period_secs,
-        )?)
+        Ok(self
+            .inner
+            .flows
+            .upsert_by_key(&self.tenant(), key, parallelism, rate, period_secs)?)
     }
 
     /// Reuse matching profile by key+limits, else create/update.
@@ -355,23 +348,17 @@ impl Broker {
         rate: u32,
         period_secs: u64,
     ) -> Result<crate::flows::FlowProfile, BrokerError> {
-        Ok(self.inner.flows.ensure_by_key(
-            &self.tenant(),
-            key,
-            parallelism,
-            rate,
-            period_secs,
-        )?)
+        Ok(self
+            .inner
+            .flows
+            .ensure_by_key(&self.tenant(), key, parallelism, rate, period_secs)?)
     }
 
     pub fn get_flow_profile_by_key(
         &self,
         key: &str,
     ) -> Result<Option<crate::flows::FlowProfile>, BrokerError> {
-        Ok(self
-            .inner
-            .flows
-            .get_by_key(&self.tenant(), key)?)
+        Ok(self.inner.flows.get_by_key(&self.tenant(), key)?)
     }
 
     pub fn list_flow_profiles(&self) -> Result<Vec<crate::flows::FlowProfile>, BrokerError> {
@@ -379,10 +366,7 @@ impl Broker {
     }
 
     pub fn list_queues(&self) -> Result<Vec<Subscription>, BrokerError> {
-        Ok(self
-            .inner
-            .subscriptions
-            .list_all(&self.tenant())?)
+        Ok(self.inner.subscriptions.list_all(&self.tenant())?)
     }
 
     pub fn delete_flow_profile(&self, id: Uuid) -> Result<crate::flows::FlowProfile, BrokerError> {
@@ -393,10 +377,7 @@ impl Broker {
         &self,
         id: Uuid,
     ) -> Result<Option<crate::flows::FlowProfile>, BrokerError> {
-        Ok(self
-            .inner
-            .flows
-            .get_by_id(&self.tenant(), id)?)
+        Ok(self.inner.flows.get_by_id(&self.tenant(), id)?)
     }
 
     pub fn create_subscription(
@@ -831,31 +812,19 @@ impl Broker {
     }
 
     pub fn create_group(&self, name: String) -> Result<crate::groups::DispatchGroup, BrokerError> {
-        Ok(self
-            .inner
-            .groups
-            .create_group(&self.tenant(), name)?)
+        Ok(self.inner.groups.create_group(&self.tenant(), name)?)
     }
 
     pub fn list_groups(&self) -> Result<Vec<crate::groups::DispatchGroup>, BrokerError> {
-        Ok(self
-            .inner
-            .groups
-            .list_groups(&self.tenant())?)
+        Ok(self.inner.groups.list_groups(&self.tenant())?)
     }
 
     pub fn get_group(&self, id: Uuid) -> Result<Option<crate::groups::DispatchGroup>, BrokerError> {
-        Ok(self
-            .inner
-            .groups
-            .get_group(&self.tenant(), id)?)
+        Ok(self.inner.groups.get_group(&self.tenant(), id)?)
     }
 
     pub fn delete_group(&self, id: Uuid) -> Result<crate::groups::DispatchGroup, BrokerError> {
-        Ok(self
-            .inner
-            .groups
-            .delete_group(&self.tenant(), id)?)
+        Ok(self.inner.groups.delete_group(&self.tenant(), id)?)
     }
 
     pub fn upsert_group_catalog(
@@ -894,27 +863,18 @@ impl Broker {
         &self,
         group_id: Uuid,
     ) -> Result<Vec<crate::groups::GroupMember>, BrokerError> {
-        Ok(self
-            .inner
-            .groups
-            .list_members(&self.tenant(), group_id)?)
+        Ok(self.inner.groups.list_members(&self.tenant(), group_id)?)
     }
 
     pub fn get_group_member(
         &self,
         id: Uuid,
     ) -> Result<Option<crate::groups::GroupMember>, BrokerError> {
-        Ok(self
-            .inner
-            .groups
-            .get_member(&self.tenant(), id)?)
+        Ok(self.inner.groups.get_member(&self.tenant(), id)?)
     }
 
     pub fn delete_group_member(&self, id: Uuid) -> Result<crate::groups::GroupMember, BrokerError> {
-        Ok(self
-            .inner
-            .groups
-            .delete_member(&self.tenant(), id)?)
+        Ok(self.inner.groups.delete_member(&self.tenant(), id)?)
     }
 
     pub fn upsert_group_member_catalog(
@@ -928,10 +888,7 @@ impl Broker {
         &self,
         group_id: Uuid,
     ) -> Result<Vec<crate::groups::GroupMember>, BrokerError> {
-        Ok(self
-            .inner
-            .groups
-            .active_members(&self.tenant(), group_id)?)
+        Ok(self.inner.groups.active_members(&self.tenant(), group_id)?)
     }
 
     /// Build a publish request for one group member (caller runs `publish`).

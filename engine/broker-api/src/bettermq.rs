@@ -348,7 +348,11 @@ fn to_publish_enqueue(req: EnqueueRequest) -> Result<PublishRequest, ApiError> {
 }
 
 fn to_publish_job(req: PublishJobRequest) -> Result<PublishRequest, ApiError> {
-    let has_url = req.url.as_ref().map(|u| !u.trim().is_empty()).unwrap_or(false);
+    let has_url = req
+        .url
+        .as_ref()
+        .map(|u| !u.trim().is_empty())
+        .unwrap_or(false);
     let has_group = req.group_id.is_some();
     match (has_url, has_group) {
         (true, true) => {
@@ -498,8 +502,13 @@ async fn publish_to_group(
             .broker
             .group_member_publish_request(group_id, &member, &base);
         #[cfg(feature = "cloud")]
-        let (_status, Json(inner)) =
-            publish(State(state.clone()), ingest.clone(), plan.clone(), Json(member_req)).await?;
+        let (_status, Json(inner)) = publish(
+            State(state.clone()),
+            ingest.clone(),
+            plan.clone(),
+            Json(member_req),
+        )
+        .await?;
         #[cfg(not(feature = "cloud"))]
         let (_status, Json(inner)) =
             publish(State(state.clone()), ingest.clone(), Json(member_req)).await?;
@@ -512,7 +521,9 @@ async fn publish_to_group(
         .count()
         + deliveries.iter().filter(|d| d.scheduled.is_some()).count();
     let any_scheduled = deliveries.iter().any(|d| d.scheduled.is_some());
-    let all_dup = deliveries.iter().all(|d| d.duplicate && d.scheduled.is_none());
+    let all_dup = deliveries
+        .iter()
+        .all(|d| d.duplicate && d.scheduled.is_none());
     let status = if all_dup && !any_scheduled {
         StatusCode::OK
     } else {
@@ -545,10 +556,7 @@ fn parse_dlq_payload(body: &str) -> (Option<String>, Option<String>, Option<Stri
         .get("destination_url")
         .and_then(|x| x.as_str())
         .map(str::to_string);
-    let reason = v
-        .get("reason")
-        .and_then(|x| x.as_str())
-        .map(str::to_string);
+    let reason = v.get("reason").and_then(|x| x.as_str()).map(str::to_string);
     let display_body = v
         .get("body")
         .map(|b| match b {

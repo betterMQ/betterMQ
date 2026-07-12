@@ -452,9 +452,7 @@ impl DispatchEngine {
             let max_retries = msg.max_retries;
             if attempt > max_retries {
                 let attempts = max_retries.saturating_add(1);
-                let detail = last_failure
-                    .as_deref()
-                    .unwrap_or("delivery failed");
+                let detail = last_failure.as_deref().unwrap_or("delivery failed");
                 self.move_to_dlq(
                     msg,
                     format!(

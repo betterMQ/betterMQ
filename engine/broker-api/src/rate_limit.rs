@@ -50,10 +50,7 @@ impl RateLimiter {
 }
 
 pub fn client_ip_key(headers: &axum::http::HeaderMap, fallback: Option<IpAddr>) -> String {
-    if let Some(xff) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         if let Some(first) = xff.split(',').next() {
             let ip = first.trim();
             if !ip.is_empty() {

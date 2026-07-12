@@ -126,8 +126,7 @@ impl LocalAuthStore {
         }
         if self.is_configured() {
             let existing = self.load()?;
-            let same_password =
-                constant_time_eq(&existing.password_hash, &creds.password_hash);
+            let same_password = constant_time_eq(&existing.password_hash, &creds.password_hash);
             let same_api_key = constant_time_eq(&existing.api_key_hash, &creds.api_key_hash);
             if same_password && same_api_key {
                 return Ok(());
