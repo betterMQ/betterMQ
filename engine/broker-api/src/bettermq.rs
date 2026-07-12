@@ -502,13 +502,8 @@ async fn publish_to_group(
             .broker
             .group_member_publish_request(group_id, &member, &base);
         #[cfg(feature = "cloud")]
-        let (_status, Json(inner)) = publish(
-            State(state.clone()),
-            ingest,
-            plan.clone(),
-            Json(member_req),
-        )
-        .await?;
+        let (_status, Json(inner)) =
+            publish(State(state.clone()), ingest, plan.clone(), Json(member_req)).await?;
         #[cfg(not(feature = "cloud"))]
         let (_status, Json(inner)) =
             publish(State(state.clone()), ingest, Json(member_req)).await?;
