@@ -225,6 +225,12 @@ struct BrokerInner {
 }
 
 impl Broker {
+
+    /// Active tenant for this call (request-scoped in cloud, else config default).
+    pub fn tenant(&self) -> String {
+        crate::tenant_scope::effective_tenant(&self.inner.config.tenant_id).into_owned()
+    }
+
     pub fn open(config: BrokerConfig) -> Result<Self, BrokerError> {
         let rocks_path = config.data_dir.join("rocksdb");
         let metadata = MetadataStore::open(rocks_path)?;
@@ -317,7 +323,7 @@ impl Broker {
         period_secs: u64,
     ) -> Result<crate::flows::FlowProfile, BrokerError> {
         Ok(self.inner.flows.create(
-            &self.inner.config.tenant_id,
+            &self.tenant(),
             key,
             parallelism,
             rate,
@@ -333,7 +339,24 @@ impl Broker {
         period_secs: u64,
     ) -> Result<crate::flows::FlowProfile, BrokerError> {
         Ok(self.inner.flows.upsert_by_key(
-            &self.inner.config.tenant_id,
+            &self.tenant(),
+            key,
+            parallelism,
+            rate,
+            period_secs,
+        )?)
+    }
+
+    /// Reuse matching profile by key+limits, else create/update.
+    pub fn ensure_flow_profile_by_key(
+        &self,
+        key: String,
+        parallelism: u32,
+        rate: u32,
+        period_secs: u64,
+    ) -> Result<crate::flows::FlowProfile, BrokerError> {
+        Ok(self.inner.flows.ensure_by_key(
+            &self.tenant(),
             key,
             parallelism,
             rate,
@@ -348,22 +371,22 @@ impl Broker {
         Ok(self
             .inner
             .flows
-            .get_by_key(&self.inner.config.tenant_id, key)?)
+            .get_by_key(&self.tenant(), key)?)
     }
 
     pub fn list_flow_profiles(&self) -> Result<Vec<crate::flows::FlowProfile>, BrokerError> {
-        Ok(self.inner.flows.list(&self.inner.config.tenant_id)?)
+        Ok(self.inner.flows.list(&self.tenant())?)
     }
 
     pub fn list_queues(&self) -> Result<Vec<Subscription>, BrokerError> {
         Ok(self
             .inner
             .subscriptions
-            .list_all(&self.inner.config.tenant_id)?)
+            .list_all(&self.tenant())?)
     }
 
     pub fn delete_flow_profile(&self, id: Uuid) -> Result<crate::flows::FlowProfile, BrokerError> {
-        Ok(self.inner.flows.delete(&self.inner.config.tenant_id, id)?)
+        Ok(self.inner.flows.delete(&self.tenant(), id)?)
     }
 
     pub fn get_flow_profile(
@@ -373,16 +396,16 @@ impl Broker {
         Ok(self
             .inner
             .flows
-            .get_by_id(&self.inner.config.tenant_id, id)?)
+            .get_by_id(&self.tenant(), id)?)
     }
 
     pub fn create_subscription(
         &self,
         req: CreateSubscriptionRequest,
     ) -> Result<CreateSubscriptionResponse, BrokerError> {
-        let tenant_id = &self.inner.config.tenant_id;
+        let tenant_id = self.tenant();
         let sub = self.inner.subscriptions.create(
-            tenant_id,
+            &tenant_id,
             req.topic.clone(),
             req.url.clone(),
             req.secret,
@@ -397,31 +420,31 @@ impl Broker {
     }
 
     pub fn subscriptions_for_topic(&self, topic: &str) -> Result<Vec<Subscription>, BrokerError> {
-        let tenant_id = &self.inner.config.tenant_id;
+        let tenant_id = self.tenant();
         Ok(self
             .inner
             .subscriptions
-            .unique_for_topic(tenant_id, topic)?)
+            .unique_for_topic(&tenant_id, topic)?)
     }
 
     pub fn list_endpoints(&self) -> Result<Vec<Subscription>, BrokerError> {
-        let tenant_id = &self.inner.config.tenant_id;
-        Ok(self.inner.subscriptions.list_all(tenant_id)?)
+        let tenant_id = self.tenant();
+        Ok(self.inner.subscriptions.list_all(&tenant_id)?)
     }
 
     pub fn delete_endpoint(&self, id: Uuid) -> Result<Subscription, BrokerError> {
-        let tenant_id = &self.inner.config.tenant_id;
-        Ok(self.inner.subscriptions.delete(tenant_id, id)?)
+        let tenant_id = self.tenant();
+        Ok(self.inner.subscriptions.delete(&tenant_id, id)?)
     }
 
     pub fn get_queue(&self, queue: &str) -> Result<Option<Subscription>, BrokerError> {
-        let tenant_id = &self.inner.config.tenant_id;
-        Ok(self.inner.subscriptions.get_by_name(tenant_id, queue)?)
+        let tenant_id = self.tenant();
+        Ok(self.inner.subscriptions.get_by_name(&tenant_id, queue)?)
     }
 
     pub fn get_queue_by_id(&self, id: Uuid) -> Result<Option<Subscription>, BrokerError> {
-        let tenant_id = &self.inner.config.tenant_id;
-        Ok(self.inner.subscriptions.get_by_id(tenant_id, id)?)
+        let tenant_id = self.tenant();
+        Ok(self.inner.subscriptions.get_by_id(&tenant_id, id)?)
     }
 
     pub fn partition_high_watermark(
@@ -488,14 +511,14 @@ impl Broker {
     }
 
     pub fn publish(&self, mut req: PublishRequest) -> Result<PublishResponse, BrokerError> {
-        let tenant_id = &self.inner.config.tenant_id;
+        let tenant_id = self.tenant();
         let payload = decode_payload(&req)?;
         let message_id = Uuid::new_v4();
         let (log_payload, payload_ref_json) =
-            prepare_for_log(&self.inner.blob_store, tenant_id, message_id, payload)?;
+            prepare_for_log(&self.inner.blob_store, &tenant_id, message_id, payload)?;
 
         if let Some(ref key) = req.idempotency_key {
-            if let Some(entry) = self.inner.metadata.get_dedup(tenant_id, key)? {
+            if let Some(entry) = self.inner.metadata.get_dedup(&tenant_id, key)? {
                 return Ok(PublishResponse {
                     message_id: Some(entry.message_id),
                     topic: req.topic.clone(),
@@ -533,7 +556,7 @@ impl Broker {
             } else {
                 self.inner
                     .subscriptions
-                    .get_by_name(tenant_id, &req.topic)?
+                    .get_by_name(&tenant_id, &req.topic)?
                     .ok_or_else(|| BrokerError::QueueNotFound(req.topic.clone()))?
             };
             queue_sub = Some(queue.clone());
@@ -550,7 +573,7 @@ impl Broker {
             resolve_delivery_retry(&req, queue_sub.as_ref(), &self.inner.config.retry_defaults);
 
         let partition = partition_for(
-            tenant_id,
+            &tenant_id,
             &req.topic,
             &req.routing_key,
             self.inner.config.partitions,
@@ -597,7 +620,7 @@ impl Broker {
 
         if let Some(ref key) = req.idempotency_key {
             self.inner.metadata.put_dedup(
-                tenant_id,
+                &tenant_id,
                 key,
                 &DedupEntry {
                     message_id: stored.id,
@@ -661,7 +684,7 @@ impl Broker {
             .config
             .data_dir
             .join("partitions")
-            .join(&self.inner.config.tenant_id);
+            .join(&self.tenant());
         let mut topics = Vec::new();
         let Ok(entries) = std::fs::read_dir(&tenant_dir) else {
             return Ok(topics);
@@ -742,14 +765,14 @@ impl Broker {
         }
 
         let msg = self.read_message(topic, partition, offset).ok();
-        let tenant_id = &self.inner.config.tenant_id;
+        let tenant_id = self.tenant();
 
         if let Some(ref m) = msg {
             if let Some(url) = &m.destination_url {
                 if !url.is_empty() {
                     if let Some(owner) = m.queue_id.or(m.flow_profile_id) {
                         let cursor =
-                            self.dispatch_offset(tenant_id, &owner.to_string(), partition)?;
+                            self.dispatch_offset(&tenant_id, &owner.to_string(), partition)?;
                         if cursor <= offset {
                             return Ok(false);
                         }
@@ -763,10 +786,10 @@ impl Broker {
 
     /// Freeze flow limits and queue destination from this broker's catalog before forwarding to a shard leader.
     pub fn prepare_for_cluster_forward(&self, req: &mut PublishRequest) -> Result<(), BrokerError> {
-        let tenant_id = &self.inner.config.tenant_id;
+        let tenant_id = self.tenant();
         if req.flow.is_none() {
             if let Some(id) = req.flow_id {
-                if let Some(profile) = self.inner.flows.get_by_id(tenant_id, id)? {
+                if let Some(profile) = self.inner.flows.get_by_id(&tenant_id, id)? {
                     let mut spec = profile.to_spec();
                     if spec.key.is_none() && !req.routing_key.is_empty() {
                         spec.key = Some(req.routing_key.clone());
@@ -777,11 +800,11 @@ impl Broker {
         }
         if req.destination.is_none() && req.url.is_none() {
             let queue = if let Some(id) = req.queue_id {
-                self.inner.subscriptions.get_by_id(tenant_id, id)?
+                self.inner.subscriptions.get_by_id(&tenant_id, id)?
             } else if !req.topic.is_empty() && req.topic != DIRECT_TOPIC {
                 self.inner
                     .subscriptions
-                    .get_by_name(tenant_id, &req.topic)?
+                    .get_by_name(&tenant_id, &req.topic)?
             } else {
                 None
             };
@@ -811,28 +834,28 @@ impl Broker {
         Ok(self
             .inner
             .groups
-            .create_group(&self.inner.config.tenant_id, name)?)
+            .create_group(&self.tenant(), name)?)
     }
 
     pub fn list_groups(&self) -> Result<Vec<crate::groups::DispatchGroup>, BrokerError> {
         Ok(self
             .inner
             .groups
-            .list_groups(&self.inner.config.tenant_id)?)
+            .list_groups(&self.tenant())?)
     }
 
     pub fn get_group(&self, id: Uuid) -> Result<Option<crate::groups::DispatchGroup>, BrokerError> {
         Ok(self
             .inner
             .groups
-            .get_group(&self.inner.config.tenant_id, id)?)
+            .get_group(&self.tenant(), id)?)
     }
 
     pub fn delete_group(&self, id: Uuid) -> Result<crate::groups::DispatchGroup, BrokerError> {
         Ok(self
             .inner
             .groups
-            .delete_group(&self.inner.config.tenant_id, id)?)
+            .delete_group(&self.tenant(), id)?)
     }
 
     pub fn upsert_group_catalog(
@@ -855,7 +878,7 @@ impl Broker {
         flow_key: Option<String>,
     ) -> Result<crate::groups::GroupMember, BrokerError> {
         Ok(self.inner.groups.add_member(
-            &self.inner.config.tenant_id,
+            &self.tenant(),
             group_id,
             name,
             url,
@@ -874,7 +897,7 @@ impl Broker {
         Ok(self
             .inner
             .groups
-            .list_members(&self.inner.config.tenant_id, group_id)?)
+            .list_members(&self.tenant(), group_id)?)
     }
 
     pub fn get_group_member(
@@ -884,14 +907,14 @@ impl Broker {
         Ok(self
             .inner
             .groups
-            .get_member(&self.inner.config.tenant_id, id)?)
+            .get_member(&self.tenant(), id)?)
     }
 
     pub fn delete_group_member(&self, id: Uuid) -> Result<crate::groups::GroupMember, BrokerError> {
         Ok(self
             .inner
             .groups
-            .delete_member(&self.inner.config.tenant_id, id)?)
+            .delete_member(&self.tenant(), id)?)
     }
 
     pub fn upsert_group_member_catalog(
@@ -908,7 +931,7 @@ impl Broker {
         Ok(self
             .inner
             .groups
-            .active_members(&self.inner.config.tenant_id, group_id)?)
+            .active_members(&self.tenant(), group_id)?)
     }
 
     /// Build a publish request for one group member (caller runs `publish`).
@@ -943,11 +966,11 @@ impl Broker {
             payload: base.payload.clone(),
             payload_encoding: base.payload_encoding.clone(),
             idempotency_key,
-            delay_ms: None,
+            delay_ms: base.delay_ms,
             priority: base.priority,
             flow_id: None,
-            url: None,
-            secret: None,
+            url: Some(member.url.clone()),
+            secret: Some(member.secret.clone()),
             destination: Some(DestinationSnapshot {
                 queue_id: None,
                 url: member.url.clone(),
@@ -973,12 +996,12 @@ impl Broker {
         if let Some(ref flow) = req.flow {
             return Ok(Some(flow.clone()));
         }
-        let tenant_id = &self.inner.config.tenant_id;
+        let tenant_id = self.tenant();
         if let Some(id) = req.flow_id {
             let profile = self
                 .inner
                 .flows
-                .get_by_id(tenant_id, id)?
+                .get_by_id(&tenant_id, id)?
                 .ok_or(BrokerError::FlowProfileNotFound(id))?;
             let mut spec = profile.to_spec();
             if spec.key.is_none() && !req.routing_key.is_empty() {
@@ -995,23 +1018,23 @@ impl Broker {
             return Ok(());
         }
 
-        let tenant_id = &self.inner.config.tenant_id;
+        let tenant_id = self.tenant();
         let mut logs = HashMap::new();
         for p in 0..self.inner.config.partitions {
             let backend = match self.inner.config.storage {
                 StorageMode::Local => {
-                    let pdir = partition_dir(&self.inner.config.data_dir, tenant_id, topic, p);
+                    let pdir = partition_dir(&self.inner.config.data_dir, &tenant_id, topic, p);
                     PartitionBackend::open_local(pdir, self.inner.config.log.clone())?
                 }
                 StorageMode::Slate => {
                     #[cfg(feature = "slate")]
                     {
                         let slate = self.inner.slate.as_ref().expect("slate env");
-                        let db_path = slate_db_path(tenant_id, topic, p);
+                        let db_path = slate_db_path(&tenant_id, topic, p);
                         let local_cache = slate
                             .cache_root
                             .join("local")
-                            .join(tenant_id)
+                            .join(&tenant_id)
                             .join(topic)
                             .join(format!("p{p}"));
                         PartitionBackend::open_slate(

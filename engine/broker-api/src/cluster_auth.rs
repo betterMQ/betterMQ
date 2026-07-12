@@ -1,4 +1,9 @@
 //! Shared secret for inter-broker `/internal/v1/*` calls (CP6b.3).
+//!
+//! Fail-closed: when `BETTERMQ_CLUSTER_SECRET` is unset/empty, all internal
+//! routes return 401. Single-node deployments do not need the secret for normal
+//! operation (peers never call `/internal/v1/*`); multi-node clusters must set
+//! the same secret on every node.
 
 use axum::{
     body::Body,
@@ -29,7 +34,8 @@ pub async fn require_cluster_secret(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let Some(expected) = cluster_secret() else {
-        return Ok(next.run(req).await);
+        // Fail closed: never expose internal admin/replication APIs without a secret.
+        return Err(StatusCode::UNAUTHORIZED);
     };
     let authorized = req
         .headers()
@@ -50,4 +56,15 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         .zip(b.bytes())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_eq_rejects_length_mismatch() {
+        assert!(!constant_time_eq("ab", "abc"));
+        assert!(constant_time_eq("same", "same"));
+    }
 }

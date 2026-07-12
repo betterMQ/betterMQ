@@ -83,6 +83,120 @@
     return t ? { Authorization: "Bearer " + t } : {};
   }
 
+  const btnFeedbackTimers = new WeakMap();
+
+  function btnClearTimer($btn) {
+    const el = $btn && $btn[0];
+    if (!el) return;
+    const t = btnFeedbackTimers.get(el);
+    if (t) {
+      clearTimeout(t);
+      btnFeedbackTimers.delete(el);
+    }
+  }
+
+  function btnBusy($btn, label) {
+    if (!$btn || !$btn.length) return;
+    btnClearTimer($btn);
+    if (!$btn.data("labelOrig")) $btn.data("labelOrig", $btn.html());
+    $btn
+      .prop("disabled", true)
+      .addClass("is-busy")
+      .removeClass("is-ok is-err is-copied");
+    if (label) $btn.text(label);
+  }
+
+  function btnRestore($btn, delayMs) {
+    if (!$btn || !$btn.length) return;
+    btnClearTimer($btn);
+    const el = $btn[0];
+    const restore = function () {
+      const orig = $btn.data("labelOrig");
+      $btn
+        .prop("disabled", false)
+        .removeClass("is-busy is-ok is-err is-copied");
+      if (orig != null) $btn.html(orig);
+      btnFeedbackTimers.delete(el);
+    };
+    if (delayMs && delayMs > 0) {
+      btnFeedbackTimers.set(el, setTimeout(restore, delayMs));
+    } else {
+      restore();
+    }
+  }
+
+  function btnDone($btn, label) {
+    if (!$btn || !$btn.length) return;
+    btnClearTimer($btn);
+    $btn
+      .prop("disabled", false)
+      .removeClass("is-busy is-err")
+      .addClass("is-ok")
+      .text(label || "Done");
+    btnRestore($btn, 1400);
+  }
+
+  function btnFail($btn, label) {
+    if (!$btn || !$btn.length) return;
+    btnClearTimer($btn);
+    $btn
+      .prop("disabled", false)
+      .removeClass("is-busy is-ok")
+      .addClass("is-err")
+      .text(label || "Failed");
+    btnRestore($btn, 1600);
+  }
+
+  /** Busy → Done/Failed on a jQuery promise/Deferred. */
+  function trackBtn($btn, promise, okLabel, errLabel) {
+    if (!$btn || !$btn.length) return promise;
+    btnBusy($btn);
+    return promise
+      .done(function () {
+        btnDone($btn, okLabel || "Done");
+      })
+      .fail(function () {
+        btnFail($btn, errLabel || "Failed");
+      });
+  }
+
+  function copyText(text) {
+    const t = String(text || "");
+    if (!t) return $.Deferred().reject().promise();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(t);
+    }
+    return $.Deferred(function (d) {
+      try {
+        const $ta = $("<textarea>")
+          .val(t)
+          .css({ position: "fixed", left: "-9999px" })
+          .appendTo("body");
+        $ta[0].select();
+        const ok = document.execCommand("copy");
+        $ta.remove();
+        if (ok) d.resolve();
+        else d.reject();
+      } catch (_e) {
+        d.reject();
+      }
+    }).promise();
+  }
+
+  function flashCopy($btn) {
+    if (!$btn || !$btn.length) return;
+    btnClearTimer($btn);
+    $btn.addClass("is-copied").removeClass("is-busy is-ok is-err");
+    const el = $btn[0];
+    btnFeedbackTimers.set(
+      el,
+      setTimeout(function () {
+        $btn.removeClass("is-copied");
+        btnFeedbackTimers.delete(el);
+      }, 1400)
+    );
+  }
+
   function apiGetJSON(url) {
     if (!sessionReady) {
       return $.Deferred().reject({ status: 0, statusText: "session not ready" }).promise();
@@ -135,7 +249,8 @@
     const base = apiBase();
     if (!base) return;
     syncDocsLinks();
-    const src = base + "/docs";
+    // Bust cache so Scalar remounts with a correct iframe size after tab switch.
+    const src = base + "/docs?embed=1&t=" + Date.now();
     const cur = $("#docsFrame").attr("src") || "";
     if (force || docsFrameBase !== base || !cur) {
       docsFrameBase = base;
@@ -491,11 +606,32 @@
     modalCopyText = formatJsonBody(body);
     $("#modalTitle").text(title || "Message body");
     $("#modalJson").text(modalCopyText);
+    $("#btnModalCopy").removeClass("is-copied");
     $("#modalBackdrop").removeClass("hidden");
   }
 
   function closeJsonModal() {
     $("#modalBackdrop").addClass("hidden");
+    $("#btnModalCopy").removeClass("is-copied");
+  }
+
+  let confirmOnOk = null;
+
+  function openConfirm(opts) {
+    opts = opts || {};
+    $("#confirmTitle").text(opts.title || "Are you sure?");
+    $("#confirmDesc").text(opts.description || "This action cannot be undone.");
+    $("#btnConfirmOk").text(opts.confirmLabel || "Continue");
+    confirmOnOk = typeof opts.onConfirm === "function" ? opts.onConfirm : null;
+    $("#confirmBackdrop").removeClass("hidden");
+    $("#btnConfirmCancel").trigger("focus");
+  }
+
+  function closeConfirm() {
+    $("#confirmBackdrop").addClass("hidden");
+    confirmOnOk = null;
+    const $ok = $("#btnConfirmOk");
+    btnRestore($ok, 0);
   }
 
   function fmtDurationMs(ms) {
@@ -725,40 +861,53 @@
   $("#infraStorageMode").on("change", toggleInfraS3Fields);
 
   $("#btnInfraSaveNode").on("click", function () {
-    apiPutJSON(apiBase() + "/v1/infra/node", {
-      name: $("#infraNodeName").val(),
-      public_url: $("#infraPublicUrl").val(),
-      listen: "0.0.0.0:8080",
-    })
-      .done(function (res) {
-        log(res.message || "Node settings saved");
-        if (res.needs_restart) showInfraRestart(res.message);
-        refreshInfra();
-        pollClusterStatus();
+    const $btn = $(this);
+    trackBtn(
+      $btn,
+      apiPutJSON(apiBase() + "/v1/infra/node", {
+        name: $("#infraNodeName").val(),
+        public_url: $("#infraPublicUrl").val(),
+        listen: "0.0.0.0:8080",
       })
-      .fail(function (xhr) {
-        log(noteApiError("infra", xhr), true);
-      });
+        .done(function (res) {
+          log(res.message || "Node settings saved");
+          if (res.needs_restart) showInfraRestart(res.message);
+          refreshInfra();
+          pollClusterStatus();
+        })
+        .fail(function (xhr) {
+          log(noteApiError("infra", xhr), true);
+        }),
+      "Saved",
+      "Failed"
+    );
   });
 
   $("#btnInfraTestS3").on("click", function () {
+    const $btn = $(this);
     const $r = $("#infraS3TestResult").text("Testing…");
-    apiPostJSON(apiBase() + "/v1/infra/storage/test", {
-      endpoint: $("#infraS3Endpoint").val(),
-      bucket: $("#infraS3Bucket").val(),
-      access_key: $("#infraS3AccessKey").val(),
-      secret_key: $("#infraS3SecretKey").val() || "••••••••",
-      region: $("#infraS3Region").val(),
-    })
-      .done(function (res) {
-        $r.text(res.message).css("color", res.ok ? "var(--success)" : "var(--destructive)");
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/infra/storage/test", {
+        endpoint: $("#infraS3Endpoint").val(),
+        bucket: $("#infraS3Bucket").val(),
+        access_key: $("#infraS3AccessKey").val(),
+        secret_key: $("#infraS3SecretKey").val() || "••••••••",
+        region: $("#infraS3Region").val(),
       })
-      .fail(function (xhr) {
-        $r.text(noteApiError("s3", xhr));
-      });
+        .done(function (res) {
+          $r.text(res.message).css("color", res.ok ? "var(--success)" : "var(--destructive)");
+        })
+        .fail(function (xhr) {
+          $r.text(noteApiError("s3", xhr));
+        }),
+      "OK",
+      "Failed"
+    );
   });
 
   $("#btnInfraSaveStorage").on("click", function () {
+    const $btn = $(this);
     const mode = $("#infraStorageMode").val();
     const body = { mode: mode };
     if (mode === "slate") {
@@ -771,76 +920,105 @@
         region: $("#infraS3Region").val(),
       };
     }
-    apiPutJSON(apiBase() + "/v1/infra/storage", body)
-      .done(function (res) {
-        log(res.message);
-        if (res.needs_restart) showInfraRestart(res.message);
-        refreshInfra();
-      })
-      .fail(function (xhr) {
-        log(noteApiError("storage", xhr), true);
-      });
+    trackBtn(
+      $btn,
+      apiPutJSON(apiBase() + "/v1/infra/storage", body)
+        .done(function (res) {
+          log(res.message);
+          if (res.needs_restart) showInfraRestart(res.message);
+          refreshInfra();
+        })
+        .fail(function (xhr) {
+          log(noteApiError("storage", xhr), true);
+        }),
+      "Saved",
+      "Failed"
+    );
   });
 
   $("#btnInfraCreateCluster").on("click", function () {
-    apiPostJSON(apiBase() + "/v1/infra/cluster/create", {})
-      .done(function (res) {
-        log(res.message);
-        $("#infraJoinTokenBox").removeClass("hidden");
-        $("#infraJoinToken").text(res.join_token);
-        $("#infraSeedUrlHint").text(
-          "Seed URL for joiners: " + ($("#infraPublicUrl").val() || apiBase())
-        );
-        if (res.needs_restart) showInfraRestart(res.message);
-        refreshInfra();
-        pollClusterStatus();
-      })
-      .fail(function (xhr) {
-        log(noteApiError("cluster", xhr), true);
-      });
+    const $btn = $(this);
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/infra/cluster/create", {})
+        .done(function (res) {
+          log(res.message);
+          $("#infraJoinTokenBox").removeClass("hidden");
+          $("#infraJoinToken").text(res.join_token);
+          $("#infraSeedUrlHint").text(
+            "Seed URL for joiners: " + ($("#infraPublicUrl").val() || apiBase())
+          );
+          if (res.needs_restart) showInfraRestart(res.message);
+          refreshInfra();
+          pollClusterStatus();
+        })
+        .fail(function (xhr) {
+          log(noteApiError("cluster", xhr), true);
+        }),
+      "Created",
+      "Failed"
+    );
   });
 
   $("#btnInfraSyncCluster").on("click", function () {
-    apiPostJSON(apiBase() + "/v1/infra/cluster/sync", {})
-      .done(function (res) {
-        log("Synced " + res.nodes.length + " nodes from seed");
-        showInfraRestart("Restart recommended after sync.");
-        refreshInfra();
-        pollClusterStatus();
-      })
-      .fail(function (xhr) {
-        log(noteApiError("sync", xhr), true);
-      });
+    const $btn = $(this);
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/infra/cluster/sync", {})
+        .done(function (res) {
+          log("Synced " + res.nodes.length + " nodes from seed");
+          showInfraRestart("Restart recommended after sync.");
+          refreshInfra();
+          pollClusterStatus();
+        })
+        .fail(function (xhr) {
+          log(noteApiError("sync", xhr), true);
+        }),
+      "Synced",
+      "Failed"
+    );
   });
 
   $("#btnInfraTestSeed").on("click", function () {
-    apiPostJSON(apiBase() + "/v1/infra/cluster/test-peer", {
-      url: $("#infraJoinSeed").val(),
-    })
-      .done(function (res) {
-        log(res.message + (res.version ? " (v" + res.version + ")" : ""), !res.ok);
+    const $btn = $(this);
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/infra/cluster/test-peer", {
+        url: $("#infraJoinSeed").val(),
       })
-      .fail(function (xhr) {
-        log(noteApiError("peer", xhr), true);
-      });
+        .done(function (res) {
+          log(res.message + (res.version ? " (v" + res.version + ")" : ""), !res.ok);
+        })
+        .fail(function (xhr) {
+          log(noteApiError("peer", xhr), true);
+        }),
+      "OK",
+      "Failed"
+    );
   });
 
   $("#btnInfraJoinCluster").on("click", function () {
-    apiPostJSON(apiBase() + "/v1/infra/cluster/join", {
-      seed_url: $("#infraJoinSeed").val(),
-      join_token: $("#infraJoinTokenInput").val(),
-      node_name: $("#infraJoinNodeName").val(),
-      public_url: $("#infraJoinPublicUrl").val(),
-    })
-      .done(function (res) {
-        log(res.message);
-        if (res.needs_restart) showInfraRestart(res.message);
-        refreshInfra();
-        pollClusterStatus();
+    const $btn = $(this);
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/infra/cluster/join", {
+        seed_url: $("#infraJoinSeed").val(),
+        join_token: $("#infraJoinTokenInput").val(),
+        node_name: $("#infraJoinNodeName").val(),
+        public_url: $("#infraJoinPublicUrl").val(),
       })
-      .fail(function (xhr) {
-        log(noteApiError("join", xhr), true);
-      });
+        .done(function (res) {
+          log(res.message);
+          if (res.needs_restart) showInfraRestart(res.message);
+          refreshInfra();
+          pollClusterStatus();
+        })
+        .fail(function (xhr) {
+          log(noteApiError("join", xhr), true);
+        }),
+      "Joined",
+      "Failed"
+    );
   });
 
   $("#infraNodesBody").on("click", ".infra-remove-node", function () {
@@ -1034,14 +1212,45 @@
     });
   }
 
+  function setNavOpen(open) {
+    const on = !!open;
+    $("#appLayout").toggleClass("nav-open", on);
+    $("body").toggleClass("nav-open", on);
+    $("#navBackdrop").prop("hidden", !on);
+    $("#btnOpenNav").attr("aria-expanded", on ? "true" : "false");
+  }
+
   function showPanel(panelId) {
+    // Token gate: only Settings is reachable until sessionReady.
+    if (!sessionReady && panelId !== "panel-settings") {
+      openGate("Paste your API token to continue.");
+      return;
+    }
+    if (!sessionReady && panelId === "panel-settings") {
+      $("body").addClass("auth-locked auth-settings-only");
+      $("#authSetup, #tokenReveal, #authGate").addClass("hidden");
+    }
     $(".view-panel").attr("hidden", true);
     $("#" + panelId).removeAttr("hidden");
     $("#mainNav [data-panel]").removeClass("active");
     $('#mainNav [data-panel="' + panelId + '"]').addClass("active");
     $(".content").toggleClass("content-docs-mode", panelId === "panel-docs");
+    setNavOpen(false);
     onPanelShown(panelId);
   }
+
+  $("#btnOpenNav").on("click", function () {
+    setNavOpen(true);
+  });
+  $("#btnCloseNav, #navBackdrop").on("click", function () {
+    setNavOpen(false);
+  });
+  $(document).on("keydown", function (e) {
+    if (e.key === "Escape") setNavOpen(false);
+  });
+  $(window).on("resize", function () {
+    if (window.matchMedia("(min-width: 901px)").matches) setNavOpen(false);
+  });
 
   $("#mainNav").on("click", "[data-panel]", function () {
     showPanel($(this).data("panel"));
@@ -1268,13 +1477,22 @@
     const opts = groupsCache.map(function (g) {
       return $("<option>").val(g.group_id).text(g.name + " (" + g.group_id.slice(0, 8) + "…)");
     });
-    $("#grpMemberGroup, #grpPubGroup").each(function () {
+    $("#grpMemberGroup, #pubGroupId").each(function () {
       const $sel = $(this).empty().append($("<option>").val("").text("— select group —"));
       opts.forEach(function ($o) {
         $sel.append($o.clone());
       });
     });
   }
+
+  function syncPublishMode() {
+    const group = $("#pubMode").val() === "group";
+    $("#pubUrlWrap, #pubSecretWrap, #pubFlowWrap").toggleClass("hidden", group);
+    $("#pubGroupWrap").toggleClass("hidden", !group);
+  }
+
+  $("#pubMode").on("change", syncPublishMode);
+  syncPublishMode();
 
   function refreshGroupMembers(groupId) {
     const $tb = $("#groupMembersBody").empty();
@@ -1295,9 +1513,9 @@
           $act.append(
             $('<button type="button" class="btn-sm btn-destructive">')
               .text("Delete")
-              .data("kind", "group-member")
-              .data("group", groupId)
-              .data("id", m.member_id)
+              .attr("data-kind", "group-member")
+              .attr("data-group", groupId)
+              .attr("data-id", m.member_id)
           );
           $tr.append($act);
           $tb.append($tr);
@@ -1323,20 +1541,20 @@
           $act.append(
             $('<button type="button" class="btn-sm">')
               .text("Members")
-              .data("goto-group", g.group_id)
+              .attr("data-goto-group", g.group_id)
           );
           $act.append(
             $('<button type="button" class="btn-sm btn-destructive">')
               .text("Delete")
-              .data("kind", "group")
-              .data("id", g.group_id)
+              .attr("data-kind", "group")
+              .attr("data-id", g.group_id)
           );
           $tr.append($act);
           $tb.append($tr);
         });
         if (!groupsCache.length) emptyRow($tb, 3, "No groups yet");
         log("Groups refreshed (" + groupsCache.length + ")");
-        const sel = $("#grpMemberGroup").val() || $("#grpPubGroup").val();
+        const sel = $("#grpMemberGroup").val() || $("#pubGroupId").val();
         if (sel) refreshGroupMembers(sel);
       })
       .fail(function (xhr) {
@@ -1382,7 +1600,7 @@
         $sel.empty();
         if (!sources.length) {
           $sel.append($("<option>").val("").text("No DLQ sources"));
-          $("#dlqTopicHint").text("");
+          $("#dlqTopicHint").val("");
           return;
         }
         let pick = selectTopic;
@@ -1396,34 +1614,47 @@
         if (!pick) pick = sources[0].dlq_topic;
         if (selectTopic) pick = selectTopic;
         $sel.val(pick);
-        $("#dlqTopicHint").text(pick || "");
+        $("#dlqTopicHint").val(pick || "");
       })
       .fail(function (xhr) {
         $sel.empty().append($("<option>").val("").text("Failed to load sources"));
+        $("#dlqTopicHint").val("");
         log("DLQ sources failed: " + ((xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText), true);
       });
   }
 
   function deleteDlqMessage(m, dlqTopic) {
-    if (!window.confirm("Delete this DLQ message permanently?")) return;
-    const qs =
-      "dlq_topic=" +
-      encodeURIComponent(dlqTopic) +
-      "&partition=" +
-      m.partition +
-      "&offset=" +
-      m.offset;
-    apiDeleteJSON(apiBase() + "/v1/dlq?" + qs)
-      .done(function () {
-        log("DLQ message deleted");
-        refreshDlqSources(dlqTopic).always(function () {
-          refreshDlq();
-          refreshDashboard();
-        });
-      })
-      .fail(function (xhr) {
-        log("DLQ delete failed: " + apiErrorText(xhr), true);
-      });
+    openConfirm({
+      title: "Delete DLQ message?",
+      description: "This permanently removes the dead-letter record. It cannot be undone.",
+      confirmLabel: "Delete",
+      onConfirm: function ($ok) {
+        const qs =
+          "dlq_topic=" +
+          encodeURIComponent(dlqTopic) +
+          "&partition=" +
+          m.partition +
+          "&offset=" +
+          m.offset;
+        trackBtn(
+          $ok,
+          apiDeleteJSON(apiBase() + "/v1/dlq?" + qs)
+            .done(function () {
+              log("DLQ message deleted");
+              closeConfirm();
+              refreshDlqSources(dlqTopic).always(function () {
+                refreshDlq();
+                refreshDashboard();
+              });
+            })
+            .fail(function (xhr) {
+              log("DLQ delete failed: " + apiErrorText(xhr), true);
+            }),
+          "Deleted",
+          "Failed"
+        );
+      },
+    });
   }
 
   function refreshDlq() {
@@ -1431,7 +1662,7 @@
     const dlqTopic = $("#dlqSource").val();
     const limit = parseInt($("#dlqLimit").val(), 10) || 20;
     if (!dlqTopic) {
-      emptyRow($tb, 6, "Select a DLQ source");
+      emptyRow($tb, 7, "Select a DLQ source");
       return;
     }
     const $opt = $("#dlqSource option:selected");
@@ -1441,14 +1672,27 @@
       : "dlq_topic=" + encodeURIComponent(dlqTopic);
     apiGetJSON(apiBase() + "/v1/dlq?" + qs + "&limit=" + limit)
       .done(function (data) {
-        $("#dlqTopicHint").text(data.dlq_topic || dlqTopic);
+        $("#dlqTopicHint").val(data.dlq_topic || dlqTopic);
         (data.messages || []).forEach(function (m) {
           const $tr = $("<tr>");
           $tr.append(td(m.message_id, "mono"));
           $tr.append(td(m.source_queue || "—", "muted"));
-          $tr.append(td(trunc(m.destination_url || "—", 40), "mono"));
+          $tr.append(td(trunc(m.destination_url || "—", 36), "mono"));
+          $tr.append(
+            $("<td>")
+              .addClass("dlq-reason")
+              .attr("title", m.reason || "")
+              .text(m.reason || "—")
+          );
           $tr.append(td(fmtTime(m.published_at_ms), "muted"));
-          $tr.append(td(trunc(m.body, 48), "mono"));
+          const $body = $("<td>")
+            .addClass("mono dlq-body-cell")
+            .attr("title", "Click to view")
+            .text(trunc(m.body, 40))
+            .on("click", function () {
+              showJsonModal("DLQ · " + m.message_id, m.body);
+            });
+          $tr.append($body);
           const $act = actionsCell();
           $act.append(
             $("<button>")
@@ -1470,7 +1714,7 @@
           $tb.append($tr);
         });
         const label = $opt.text() || data.dlq_topic;
-        if (!(data.messages || []).length) emptyRow($tb, 6, "DLQ empty for " + label);
+        if (!(data.messages || []).length) emptyRow($tb, 7, "DLQ empty for " + label);
         log("DLQ: " + (data.messages || []).length + " on " + data.dlq_topic);
       })
       .fail(function (xhr) {
@@ -1491,10 +1735,11 @@
     if (panelId === "panel-queues") refreshEndpoints();
     if (panelId === "panel-groups") refreshGroups();
     if (panelId === "panel-flows") refreshFlows();
-    if (panelId === "panel-docs") loadDocsFrame();
+    if (panelId === "panel-docs") loadDocsFrame(true);
   }
 
   $("#btnDashPublish").on("click", function () {
+    const $btn = $(this);
     const payload = {
       url: $("#dashPubUrl").val(),
       secret: $("#dashPubSecret").val(),
@@ -1503,21 +1748,28 @@
       priority: 5,
     };
     if (!mergeOutbound(payload)) return;
-    $.ajax({
-      url: apiBase() + "/v1/publish",
-      method: "POST",
-      contentType: "application/json",
-      data: JSON.stringify(payload),
-    })
-      .done(function (r) {
-        log("Published " + (r.message_id || "ok"));
+    trackBtn(
+      $btn,
+      $.ajax({
+        url: apiBase() + "/v1/publish",
+        method: "POST",
+        contentType: "application/json",
+        data: JSON.stringify(payload),
       })
-      .fail(function (xhr) {
-        log("Publish failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
-      });
+        .done(function (r) {
+          log("Published " + (r.message_id || "ok"));
+        })
+        .fail(function (xhr) {
+          log("Publish failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
+        }),
+      "Published",
+      "Failed"
+    );
   });
 
   $("#btnRefreshAll").on("click", function () {
+    const $btn = $(this);
+    btnBusy($btn, "Refreshing…");
     pollHealth();
     refreshDashboard();
     refreshInfra();
@@ -1525,47 +1777,82 @@
     refreshEndpoints();
     refreshGroups();
     refreshFlows();
+    btnDone($btn, "Refreshed");
   });
 
-  $("#btnRefreshDlq").on("click", refreshDlq);
+  $("#btnRefreshDlq").on("click", function () {
+    const $btn = $(this);
+    btnBusy($btn, "Loading…");
+    refreshDlq();
+    btnDone($btn, "Loaded");
+  });
   $("#dlqSource").on("change", refreshDlq);
 
   $("#btnModalClose, #btnModalClose2").on("click", closeJsonModal);
   $("#modalBackdrop").on("click", function (e) {
     if (e.target === this) closeJsonModal();
   });
+  $("#btnConfirmCancel").on("click", closeConfirm);
+  $("#confirmBackdrop").on("click", function (e) {
+    if (e.target === this) closeConfirm();
+  });
+  $("#btnConfirmOk").on("click", function () {
+    if (typeof confirmOnOk === "function") confirmOnOk($(this));
+  });
+  $(document).on("keydown.confirmDialog", function (e) {
+    if (e.key !== "Escape") return;
+    if (!$("#confirmBackdrop").hasClass("hidden")) {
+      e.preventDefault();
+      closeConfirm();
+    }
+  });
   $("#btnModalCopy").on("click", function () {
     if (!modalCopyText) return;
-    navigator.clipboard.writeText(modalCopyText).then(
+    const $btn = $(this);
+    copyText(modalCopyText).then(
       function () {
+        flashCopy($btn);
         log("Copied to clipboard");
       },
       function () {
+        btnFail($btn, "Failed");
         log("Copy failed", true);
       }
     );
   });
 
-  $("#btnRefreshBlocked").on("click", refreshBlockedHosts);
+  $("#btnRefreshBlocked").on("click", function () {
+    const $btn = $(this);
+    btnBusy($btn, "…");
+    refreshBlockedHosts();
+    btnDone($btn, "Done");
+  });
   $("#btnBlockHost").on("click", function () {
+    const $btn = $(this);
     const host = ($("#blockHostInput").val() || "").trim();
     const mins = parseInt($("#blockHostMinutes").val(), 10) || 30;
     if (!host) {
       log("Host or URL required", true);
+      btnFail($btn, "Need host");
       return;
     }
-    apiPostJSON(apiBase() + "/v1/destinations/block", {
-      host: host,
-      duration_ms: mins * 60 * 1000,
-    })
-      .done(function (res) {
-        log("Blocked " + (res.host || host) + " for " + mins + "m");
-        $("#blockHostInput").val("");
-        refreshBlockedHosts();
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/destinations/block", {
+        host: host,
+        duration_ms: mins * 60 * 1000,
       })
-      .fail(function (xhr) {
-        log("Block failed: " + apiErrorText(xhr), true);
-      });
+        .done(function (res) {
+          log("Blocked " + (res.host || host) + " for " + mins + "m");
+          $("#blockHostInput").val("");
+          refreshBlockedHosts();
+        })
+        .fail(function (xhr) {
+          log("Block failed: " + apiErrorText(xhr), true);
+        }),
+      "Blocked",
+      "Failed"
+    );
   });
   $("#btnToggleLog").on("click", function () {
     setLogDockExpanded(!$logDock.hasClass("is-expanded"));
@@ -1587,35 +1874,81 @@
   });
 
   $("#btnPublish").on("click", function () {
+    const $btn = $(this);
+    const mode = $("#pubMode").val();
     const payload = {
-      url: $("#pubUrl").val(),
-      secret: $("#pubSecret").val(),
       key: $("#pubKey").val(),
       body: parseBody($("#pubBody").val()),
       priority: parseInt($("#pubPriority").val(), 10) || 5,
     };
-    const fid = optFlowId($("#pubFlowId").val());
-    if (fid) payload.flow_id = fid;
+    if (mode === "group") {
+      const gid = $("#pubGroupId").val();
+      if (!gid) {
+        log("Select a group first", true);
+        btnFail($btn, "Need group");
+        return;
+      }
+      payload.group_id = gid;
+    } else {
+      payload.url = $("#pubUrl").val();
+      payload.secret = $("#pubSecret").val();
+      const flowKey = ($("#pubFlowKey").val() || "").trim();
+      const flowPar = parseInt($("#pubFlowParallelism").val(), 10);
+      const flowRate = parseInt($("#pubFlowRate").val(), 10);
+      const flowPeriod = parseInt($("#pubFlowPeriod").val(), 10);
+      const hasInlineFlow =
+        flowKey ||
+        Number.isFinite(flowPar) ||
+        Number.isFinite(flowRate) ||
+        Number.isFinite(flowPeriod);
+      if (hasInlineFlow) {
+        const flowControl = {};
+        if (flowKey) flowControl.key = flowKey;
+        if (Number.isFinite(flowPar) && flowPar > 0) flowControl.parallelism = flowPar;
+        if (Number.isFinite(flowRate) && flowRate >= 0) flowControl.rate = flowRate;
+        if (Number.isFinite(flowPeriod) && flowPeriod > 0) flowControl.period = flowPeriod;
+        payload.flowControl = flowControl;
+      } else {
+        const fid = optFlowId($("#pubFlowId").val());
+        if (fid) payload.flow_id = fid;
+      }
+    }
     const idem = ($("#pubIdempotency").val() || "").trim();
     if (idem) payload.idempotency_key = idem;
     mergeRetryFields(payload, "pub");
     const pubDelay = parseInt($("#pubDelay").val(), 10);
     if (pubDelay > 0) payload.delay = pubDelay;
     if (!mergeOutbound(payload)) return;
-    apiPostJSON(apiBase() + "/v1/publish", payload)
-      .done(function (r) {
-        log("Published " + (r.message_id || (r.scheduled && r.scheduled.schedule_id)));
-        refreshJobs();
-      })
-      .fail(function (xhr) {
-        log("Publish failed: " + apiErrorText(xhr), true);
-      });
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/publish", payload)
+        .done(function (r) {
+          if (r.group_id) {
+            log(
+              "Group publish accepted " +
+                (r.accepted || 0) +
+                " / " +
+                ((r.deliveries && r.deliveries.length) || 0)
+            );
+          } else {
+            log("Published " + (r.message_id || (r.scheduled && r.scheduled.schedule_id)));
+          }
+          if (payload.flowControl) refreshFlows();
+          refreshJobs();
+        })
+        .fail(function (xhr) {
+          log("Publish failed: " + apiErrorText(xhr), true);
+        }),
+      "Published",
+      "Failed"
+    );
   });
 
-  function enqueueToQueue($queueSel, keyVal, bodyRaw, priority, idempotency, delayMs, doneMsg) {
+  function enqueueToQueue($btn, $queueSel, keyVal, bodyRaw, priority, idempotency, delayMs, doneMsg) {
     const qid = $queueSel.val();
     if (!qid) {
       log("Select a queue first", true);
+      if ($btn) btnFail($btn, "Need queue");
       return;
     }
     const payload = {
@@ -1628,7 +1961,7 @@
     if (idem) payload.idempotency_key = idem;
     if (delayMs != null) payload.delay = delayMs;
     if (!mergeOutbound(payload)) return;
-    apiPostJSON(apiBase() + "/v1/queues/" + qid + "/enqueue", payload)
+    const req = apiPostJSON(apiBase() + "/v1/queues/" + qid + "/enqueue", payload)
       .done(function (r) {
         log(doneMsg + (r.message_id || (r.scheduled && r.scheduled.schedule_id) || "?"));
         refreshJobs();
@@ -1636,11 +1969,14 @@
       .fail(function (xhr) {
         log("Enqueue failed: " + apiErrorText(xhr), true);
       });
+    if ($btn) trackBtn($btn, req, "Enqueued", "Failed");
   }
 
   $("#btnEnqueueNow").on("click", function () {
+    const $btn = $(this);
     const delay = parseInt($("#enqDelay").val(), 10);
     enqueueToQueue(
+      $btn,
       $("#enqQueueId"),
       $("#enqKey").val(),
       $("#enqBody").val(),
@@ -1652,33 +1988,41 @@
   });
 
   $("#btnCreateFlow").on("click", function () {
-    $.ajax({
-      url: apiBase() + "/v1/flows",
-      method: "POST",
-      contentType: "application/json",
-      data: JSON.stringify({
-        key: $("#flowKey").val(),
-        parallelism: parseInt($("#flowParallelism").val(), 10) || 1,
-        rate: parseInt($("#flowRate").val(), 10) || 0,
-        period_secs: parseInt($("#flowPeriod").val(), 10) || 60,
-      }),
-    })
-      .done(function (r) {
-        log("Flow created " + r.flow_id);
-        $("#pubFlowId, #cronFlowId").val(r.flow_id);
-        if (!$("#pubKey").val()) $("#pubKey").val($("#flowKey").val());
-        refreshFlows();
+    const $btn = $(this);
+    trackBtn(
+      $btn,
+      $.ajax({
+        url: apiBase() + "/v1/flows",
+        method: "POST",
+        contentType: "application/json",
+        data: JSON.stringify({
+          key: $("#flowKey").val(),
+          parallelism: parseInt($("#flowParallelism").val(), 10) || 1,
+          rate: parseInt($("#flowRate").val(), 10) || 0,
+          period_secs: parseInt($("#flowPeriod").val(), 10) || 60,
+        }),
       })
-      .fail(function (xhr) {
-        log("Flow failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
-      });
+        .done(function (r) {
+          log("Flow created " + r.flow_id);
+          $("#pubFlowId, #cronFlowId").val(r.flow_id);
+          if (!$("#pubKey").val()) $("#pubKey").val($("#flowKey").val());
+          refreshFlows();
+        })
+        .fail(function (xhr) {
+          log("Flow failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
+        }),
+      "Created",
+      "Failed"
+    );
   });
 
   $("#btnCreateCron").on("click", function () {
+    const $btn = $(this);
     const url = ($("#cronUrl").val() || "").trim();
     const secret = ($("#cronSecret").val() || "").trim();
     if (!url || !secret) {
       log("Schedule needs destination URL and secret", true);
+      btnFail($btn, "Need URL");
       return;
     }
     const payload = {
@@ -1697,14 +2041,19 @@
     if (fid) payload.flow_id = fid;
     mergeRetryFields(payload, "cron");
     if (!mergeOutbound(payload)) return;
-    apiPostJSON(apiBase() + "/v1/crons", payload)
-      .done(function (r) {
-        log("Schedule created " + r.cron_id);
-        refreshJobs();
-      })
-      .fail(function (xhr) {
-        log("Schedule failed: " + JSON.stringify(xhr.responseText || xhr.statusText), true);
-      });
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/crons", payload)
+        .done(function (r) {
+          log("Schedule created " + r.cron_id);
+          refreshJobs();
+        })
+        .fail(function (xhr) {
+          log("Schedule failed: " + JSON.stringify(xhr.responseText || xhr.statusText), true);
+        }),
+      "Created",
+      "Failed"
+    );
   });
 
   $("#grpMemberGroup").on("change", function () {
@@ -1712,131 +2061,170 @@
   });
 
   $("#btnCreateGroup").on("click", function () {
-    apiPostJSON(apiBase() + "/v1/groups", { name: $("#grpName").val() })
-      .done(function (r) {
-        log("Group " + r.name + " → " + r.group_id);
-        refreshGroups();
-      })
-      .fail(function (xhr) {
-        log("Group failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
-      });
+    const $btn = $(this);
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/groups", { name: $("#grpName").val() })
+        .done(function (r) {
+          log("Group " + r.name + " → " + r.group_id);
+          refreshGroups();
+          $("#grpMemberGroup").val(r.group_id);
+          refreshGroupMembers(r.group_id);
+          setGroupsTab("members");
+        })
+        .fail(function (xhr) {
+          log("Group failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
+        }),
+      "Created",
+      "Failed"
+    );
   });
 
   $("#btnAddGroupMember").on("click", function () {
+    const $btn = $(this);
     const gid = $("#grpMemberGroup").val();
     if (!gid) {
       log("Select a group first", true);
+      btnFail($btn, "Need group");
       return;
     }
-    apiPostJSON(apiBase() + "/v1/groups/" + gid + "/members", {
-      name: $("#grpMemberName").val(),
-      url: $("#grpMemberUrl").val(),
-      secret: $("#grpMemberSecret").val(),
-      parallelism: parseInt($("#grpMemberParallelism").val(), 10) || 1,
-      rate: parseInt($("#grpMemberRate").val(), 10) || 0,
-      period_secs: parseInt($("#grpMemberPeriod").val(), 10) || 60,
-    })
-      .done(function (r) {
-        log("Member " + r.name + " → " + r.member_id);
-        refreshGroupMembers(gid);
+    trackBtn(
+      $btn,
+      apiPostJSON(apiBase() + "/v1/groups/" + gid + "/members", {
+        name: $("#grpMemberName").val(),
+        url: $("#grpMemberUrl").val(),
+        secret: $("#grpMemberSecret").val(),
+        parallelism: parseInt($("#grpMemberParallelism").val(), 10) || 1,
+        rate: parseInt($("#grpMemberRate").val(), 10) || 0,
+        period_secs: parseInt($("#grpMemberPeriod").val(), 10) || 60,
       })
-      .fail(function (xhr) {
-        log("Member failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
-      });
+        .done(function (r) {
+          log("Member " + r.name + " → " + r.member_id);
+          refreshGroupMembers(gid);
+        })
+        .fail(function (xhr) {
+          log("Member failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
+        }),
+      "Added",
+      "Failed"
+    );
   });
 
-  $("#btnGroupPublish").on("click", function () {
-    const gid = $("#grpPubGroup").val();
-    if (!gid) {
-      log("Select a group first", true);
-      return;
-    }
-    apiPostJSON(apiBase() + "/v1/groups/" + gid + "/publish", {
-      key: $("#grpPubKey").val(),
-      body: parseBody($("#grpPubBody").val()),
-    })
-      .done(function (r) {
-        log("Group publish accepted " + r.accepted + " / " + (r.deliveries || []).length);
-      })
-      .fail(function (xhr) {
-        log("Group publish failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
-      });
+  function setGroupsTab(tab) {
+    const $root = $("#groupsTabs");
+    if (!$root.length) return;
+    $root.find(".tabs-trigger").each(function () {
+      const on = $(this).data("tab") === tab;
+      $(this).toggleClass("is-active", on).attr("aria-selected", on ? "true" : "false");
+    });
+    $root.find(".tabs-panel").each(function () {
+      const on = $(this).data("tab-panel") === tab;
+      $(this).toggleClass("is-active", on).prop("hidden", !on);
+    });
+  }
+
+  $("#groupsTabs").on("click", ".tabs-trigger", function () {
+    setGroupsTab($(this).data("tab"));
   });
 
   $("#groupsBody").on("click", "button[data-goto-group]", function () {
     const gid = $(this).data("goto-group");
     $("#grpMemberGroup").val(gid);
+    $("#pubGroupId").val(gid);
     refreshGroupMembers(gid);
     showPanel("panel-groups");
+    setGroupsTab("members");
   });
 
   $("#btnCreateEndpoint").on("click", function () {
-    $.ajax({
-      url: apiBase() + "/v1/queues",
-      method: "POST",
-      contentType: "application/json",
-      data: JSON.stringify(
-        mergeRetryFields(
-          {
-            queue: $("#epQueue").val(),
-            url: $("#epUrl").val(),
-            secret: $("#epSecret").val(),
-          },
-          "ep"
-        )
-      ),
-    })
-      .done(function (r) {
-        log("Queue " + r.queue + " → " + r.queue_id);
-        refreshEndpoints();
+    const $btn = $(this);
+    trackBtn(
+      $btn,
+      $.ajax({
+        url: apiBase() + "/v1/queues",
+        method: "POST",
+        contentType: "application/json",
+        data: JSON.stringify(
+          mergeRetryFields(
+            {
+              queue: $("#epQueue").val(),
+              url: $("#epUrl").val(),
+              secret: $("#epSecret").val(),
+            },
+            "ep"
+          )
+        ),
       })
-      .fail(function (xhr) {
-        log("Queue failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
-      });
+        .done(function (r) {
+          log("Queue " + r.queue + " → " + r.queue_id);
+          refreshEndpoints();
+        })
+        .fail(function (xhr) {
+          log("Queue failed: " + JSON.stringify(xhr.responseJSON || xhr.statusText), true);
+        }),
+      "Created",
+      "Failed"
+    );
   });
 
   $("#jobsBody").on("click", "button", function () {
-    const kind = $(this).data("kind");
-    const id = $(this).data("id");
+    const $btn = $(this);
+    const kind = $btn.data("kind");
+    const id = $btn.data("id");
     let req;
     if (kind === "delayed") req = $.ajax({ url: apiBase() + "/v1/delayed/" + id, method: "DELETE" });
     else if (kind === "cron-pause") req = $.post(apiBase() + "/v1/crons/" + id + "/pause");
     else if (kind === "cron-resume") req = $.post(apiBase() + "/v1/crons/" + id + "/resume");
     else if (kind === "cron-delete") req = $.ajax({ url: apiBase() + "/v1/crons/" + id, method: "DELETE" });
     if (!req) return;
-    req
-      .done(function () {
-        log(kind + " ok");
-        refreshJobs();
-      })
-      .fail(function () {
-        log(kind + " failed", true);
-      });
+    trackBtn(
+      $btn,
+      req
+        .done(function () {
+          log(kind + " ok");
+          refreshJobs();
+        })
+        .fail(function () {
+          log(kind + " failed", true);
+        }),
+      "Done",
+      "Failed"
+    );
   });
 
   $("#endpointsBody, #flowsBody, #groupsBody, #groupMembersBody").on("click", "button", function () {
-    const kind = $(this).data("kind");
-    const id = $(this).data("id");
+    if ($(this).is("[data-goto-group]")) return;
+    const $btn = $(this);
+    const kind = $btn.data("kind");
+    const id = $btn.data("id");
+    if (!kind || !id) return;
     let url;
     if (kind === "flow") url = apiBase() + "/v1/flows/" + id;
     else if (kind === "group") url = apiBase() + "/v1/groups/" + id;
-    else if (kind === "group-member") url = apiBase() + "/v1/groups/" + $(this).data("group") + "/members/" + id;
-    else url = apiBase() + "/v1/queues/" + id;
-    $.ajax({ url: url, method: "DELETE" })
-      .done(function () {
-        log(kind + " removed");
-        if (kind === "flow") refreshFlows();
-        else if (kind === "group" || kind === "group-member") refreshGroups();
-        else refreshEndpoints();
-      })
-      .fail(function () {
-        log("Delete failed", true);
-      });
+    else if (kind === "group-member") url = apiBase() + "/v1/groups/" + $btn.data("group") + "/members/" + id;
+    else if (kind === "queue") url = apiBase() + "/v1/queues/" + id;
+    else return;
+    trackBtn(
+      $btn,
+      $.ajax({ url: url, method: "DELETE" })
+        .done(function () {
+          log(kind + " removed");
+          if (kind === "flow") refreshFlows();
+          else if (kind === "group" || kind === "group-member") refreshGroups();
+          else refreshEndpoints();
+        })
+        .fail(function () {
+          log("Delete failed", true);
+        }),
+      "Deleted",
+      "Failed"
+    );
   });
 
 
   function showAuthOverlay(id) {
     $("#authSetup, #tokenReveal, #authGate").addClass("hidden");
+    $("body").removeClass("auth-settings-only");
     if (id) {
       $(id).removeClass("hidden");
       $("body").addClass("auth-locked");
@@ -2003,47 +2391,59 @@
   }
 
   $("#btnSetup").on("click", function () {
+    const $btn = $(this);
     const p1 = $("#setupPassword").val();
     const p2 = $("#setupPassword2").val();
     const $err = $("#setupError");
     $err.addClass("hidden").text("");
     if (p1.length < 8) {
       $err.removeClass("hidden").text("Password must be at least 8 characters.");
+      btnFail($btn, "Too short");
       return;
     }
     if (p1 !== p2) {
       $err.removeClass("hidden").text("Passwords do not match.");
+      btnFail($btn, "Mismatch");
       return;
     }
-    $.ajax({
-      url: apiBase() + "/v1/local-auth/setup",
-      method: "POST",
-      contentType: "application/json",
-      data: JSON.stringify({ password: p1 }),
-    })
-      .done(function (r) {
-        saveToken(r.token);
-        revealTokenOnce(r.token);
+    trackBtn(
+      $btn,
+      $.ajax({
+        url: apiBase() + "/v1/local-auth/setup",
+        method: "POST",
+        contentType: "application/json",
+        data: JSON.stringify({ password: p1 }),
       })
-      .fail(function (xhr) {
-        const msg =
-          (xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText || "Setup failed";
-        if (msg.indexOf("already configured") !== -1) {
-          openGate("Broker is already set up. Paste your sk_local_… token below.");
-          return;
-        }
-        $err.removeClass("hidden").text(msg);
-      });
+        .done(function (r) {
+          saveToken(r.token);
+          revealTokenOnce(r.token);
+        })
+        .fail(function (xhr) {
+          const msg =
+            (xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText || "Setup failed";
+          if (msg.indexOf("already configured") !== -1) {
+            openGate("Broker is already set up. Paste your sk_local_… token below.");
+            return;
+          }
+          $err.removeClass("hidden").text(msg);
+        }),
+      "Created",
+      "Failed"
+    );
   });
 
   $("#btnTokenDone").on("click", function () {
+    const $btn = $(this);
     const t = normalizeToken($("#tokenRevealValue").text());
     saveToken(t);
+    btnBusy($btn, "Checking…");
     verifySession(t, function (ok, err) {
       if (!ok) {
+        btnFail($btn, "Failed");
         openGate(err || "Token did not work. Regenerate in Settings.");
         return;
       }
+      btnDone($btn, "Ready");
       $("#tokenRevealValue").text("");
       showAuthOverlay(null);
       startApp();
@@ -2051,33 +2451,50 @@
   });
 
   $("#btnCopyToken").on("click", function () {
+    const $btn = $(this);
     const t = $("#tokenRevealValue").text();
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(t);
-      log("Token copied");
+    if (!t) {
+      btnFail($btn, "Empty");
+      return;
     }
+    copyText(t).then(
+      function () {
+        flashCopy($btn);
+        log("Token copied");
+      },
+      function () {
+        btnFail($btn, "Failed");
+        log("Copy failed", true);
+      }
+    );
   });
 
   function submitGateToken() {
+    const $btn = $("#btnGateSave");
     const t = normalizeToken($("#gateToken").val() || $("#apiToken").val());
     const $err = $("#gateError");
     $err.addClass("hidden").text("");
     if (!t) {
       $err.removeClass("hidden").text("Paste your sk_local_… token.");
+      btnFail($btn, "Need token");
       return;
     }
     if (!t.startsWith("sk_local_")) {
       $err.removeClass("hidden").text("Expected a sk_local_… token from this broker's setup.");
+      btnFail($btn, "Bad token");
       return;
     }
     saveToken(t);
+    btnBusy($btn, "Checking…");
     verifySession(t, function (ok, err) {
       if (ok) {
+        btnDone($btn, "Ready");
         showAuthOverlay(null);
         startApp();
         return;
       }
       clearToken();
+      btnFail($btn, "Invalid");
       $err.removeClass("hidden").text(err || "Invalid token for this broker.");
       log("Invalid token: " + err, true);
     });
@@ -2093,30 +2510,36 @@
   });
 
   $("#btnGateSettings").on("click", function () {
-    showAuthOverlay(null);
+    // Settings is allowed for password regenerate; other pages stay gated.
     showPanel("panel-settings");
   });
 
   $("#btnRegenToken").on("click", function () {
+    const $btn = $(this);
     const password = $("#regenPassword").val();
-    $.ajax({
-      url: apiBase() + "/v1/local-auth/regenerate",
-      method: "POST",
-      contentType: "application/json",
-      data: JSON.stringify({ password: password }),
-    })
-      .done(function (r) {
-        saveToken(r.token);
-        $("#regenPassword").val("");
-        revealTokenOnce(r.token);
-        log("API token regenerated");
+    trackBtn(
+      $btn,
+      $.ajax({
+        url: apiBase() + "/v1/local-auth/regenerate",
+        method: "POST",
+        contentType: "application/json",
+        data: JSON.stringify({ password: password }),
       })
-      .fail(function (xhr) {
-        log(
-          "Regenerate failed: " + ((xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText),
-          true
-        );
-      });
+        .done(function (r) {
+          saveToken(r.token);
+          $("#regenPassword").val("");
+          revealTokenOnce(r.token);
+          log("API token regenerated");
+        })
+        .fail(function (xhr) {
+          log(
+            "Regenerate failed: " + ((xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText),
+            true
+          );
+        }),
+      "Done",
+      "Failed"
+    );
   });
 
   syncDocsLinks();

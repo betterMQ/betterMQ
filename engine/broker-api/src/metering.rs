@@ -2,7 +2,7 @@
 
 use crate::AppState;
 #[cfg(feature = "cloud")]
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use std::sync::Arc;
 use uuid::Uuid;
 

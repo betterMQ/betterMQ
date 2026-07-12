@@ -1,5 +1,6 @@
 //! Async webhook delivery for committed log records.
 
+mod egress;
 mod fairness;
 mod flow_control;
 mod hmac_sig;
@@ -8,6 +9,7 @@ mod memory_guard;
 mod outbound;
 mod worker;
 
+pub use egress::{validate_destination_url, EgressError};
 pub use fairness::TenantFairQueue;
 
 pub use flow_control::{FlowControlInfo, FlowController, FlowKey, GlobalParallelismInfo};

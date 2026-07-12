@@ -1,15 +1,45 @@
 //! Standalone broker: panel-driven password + one-time API token.
 
+use crate::rate_limit::{client_ip_key, RateLimiter};
 use crate::routes::ApiError;
 use crate::AppState;
 use axum::{
     extract::State,
+    http::HeaderMap,
     routing::{get, post},
     Json, Router,
 };
 use broker_local_auth::LocalAuthError;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+fn auth_rate_limiter() -> &'static RateLimiter {
+    static LIM: OnceLock<RateLimiter> = OnceLock::new();
+    LIM.get_or_init(|| RateLimiter::new(5, Duration::from_secs(60)))
+}
+
+/// Optional one-time bootstrap token for first setup (`BETTERMQ_SETUP_TOKEN`).
+fn setup_token_ok(headers: &HeaderMap, body_token: Option<&str>) -> Result<(), ApiError> {
+    let Some(expected) = std::env::var("BETTERMQ_SETUP_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(());
+    };
+    let presented = headers
+        .get("x-bettermq-setup-token")
+        .and_then(|v| v.to_str().ok())
+        .or(body_token)
+        .unwrap_or("");
+    if presented != expected {
+        return Err(ApiError::BadRequest(
+            "invalid or missing setup token (set header x-bettermq-setup-token)".into(),
+        ));
+    }
+    Ok(())
+}
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -34,6 +64,9 @@ struct StatusResponse {
 #[derive(Deserialize)]
 struct PasswordBody {
     password: String,
+    /// Optional when `BETTERMQ_SETUP_TOKEN` is set (prefer header instead).
+    #[serde(default)]
+    setup_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -82,10 +115,23 @@ async fn propagate_local_auth(state: &AppState) {
     }
 }
 
+fn enforce_auth_rate(headers: &HeaderMap) -> Result<(), ApiError> {
+    let key = client_ip_key(headers, None);
+    if !auth_rate_limiter().check(&format!("local-auth:{key}")) {
+        return Err(ApiError::BadRequest(
+            "too many auth attempts — try again later".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn local_setup(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<PasswordBody>,
 ) -> Result<Json<TokenResponse>, ApiError> {
+    enforce_auth_rate(&headers)?;
+    setup_token_ok(&headers, body.setup_token.as_deref())?;
     let store = local_store(&state)?;
     let token = store.setup(&body.password).map_err(map_local_err)?;
     propagate_local_auth(&state).await;
@@ -97,8 +143,10 @@ async fn local_setup(
 
 async fn local_regenerate(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<PasswordBody>,
 ) -> Result<Json<TokenResponse>, ApiError> {
+    enforce_auth_rate(&headers)?;
     let store = local_store(&state)?;
     let token = store.regenerate(&body.password).map_err(map_local_err)?;
     propagate_local_auth(&state).await;

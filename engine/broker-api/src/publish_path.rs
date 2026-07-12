@@ -14,9 +14,13 @@ use percent_encoding::percent_decode_str;
 use std::sync::Arc;
 
 /// `GET /v1/publish/{*destination}` — no body; destination URL in path.
+///
+/// **Deprecated:** `secret` in the query string leaks via access logs and Referer.
+/// Prefer `POST /v1/publish` with `secret` in the JSON body. Set
+/// `BETTERMQ_ALLOW_QUERY_SECRET=1` to keep accepting query secrets temporarily.
 #[derive(Debug, serde::Deserialize)]
 pub struct PublishPathQuery {
-    pub secret: String,
+    pub secret: Option<String>,
     #[serde(default)]
     pub key: String,
     pub idempotency_key: Option<String>,
@@ -54,6 +58,16 @@ pub fn decode_destination_path(raw: &str) -> Result<String, ApiError> {
     }
 }
 
+fn allow_query_secret() -> bool {
+    matches!(
+        std::env::var("BETTERMQ_ALLOW_QUERY_SECRET")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
 pub async fn publish_get(
     State(state): State<Arc<AppState>>,
     ingest: Option<axum::extract::Extension<crate::metering::IngestAuth>>,
@@ -63,6 +77,19 @@ pub async fn publish_get(
     Path(destination): Path<String>,
     Query(q): Query<PublishPathQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let secret = match q.secret {
+        Some(s) if allow_query_secret() => s,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "query-string secret is disabled; use POST /v1/publish with secret in the body, or set BETTERMQ_ALLOW_QUERY_SECRET=1".into(),
+            ));
+        }
+        None => {
+            return Err(ApiError::BadRequest(
+                "missing secret; use POST /v1/publish with secret in the JSON body".into(),
+            ));
+        }
+    };
     let url = decode_destination_path(&destination)?;
     let mut req = PublishRequest {
         topic: broker_partition::DIRECT_TOPIC.to_string(),
@@ -77,7 +104,7 @@ pub async fn publish_get(
         priority: q.priority,
         flow_id: q.flow_id,
         url: Some(url),
-        secret: Some(q.secret),
+        secret: Some(secret),
         destination: None,
         flow: None,
         parallelism: None,

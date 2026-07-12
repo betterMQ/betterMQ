@@ -9,6 +9,7 @@ pub mod http_delivery;
 pub mod payload;
 mod priority;
 mod subscriptions;
+mod tenant_scope;
 mod topic;
 
 pub use flow::{delivery_uses_flow_control, FlowSpec, ResolvedFlow};
@@ -24,6 +25,7 @@ pub use broker::{
     DestinationSnapshot, PublishRequest, PublishResponse, ScheduledInfo, DEFAULT_PARTITIONS,
     DEFAULT_TENANT,
 };
+pub use tenant_scope::{effective_tenant, scope_tenant};
 pub use flows::{FlowProfile, FlowProfileError, FlowProfileRegistry};
 pub use groups::{DispatchGroup, GroupError, GroupMember, GroupRegistry};
 pub use subscriptions::{Subscription, SubscriptionRegistry};

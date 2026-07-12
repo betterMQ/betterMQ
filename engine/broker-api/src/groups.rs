@@ -1,16 +1,15 @@
-//! Fan-out groups API — one publish delivers to many webhook destinations.
+//! Fan-out groups API — manage groups and members (publish via `POST /v1/publish` with `group_id`).
 
-use crate::http_fields::OutboundHttpFields;
 use crate::routes::ApiError;
 use crate::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, put},
     Json, Router,
 };
-use broker_partition::{BrokerError, DispatchGroup, GroupMember, PublishRequest, PublishResponse};
+use broker_partition::{BrokerError, DispatchGroup, GroupMember};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -20,7 +19,9 @@ pub fn group_routes() -> Router<Arc<AppState>> {
         .route("/v1/groups", get(list_groups).post(create_group))
         .route(
             "/v1/groups/{group_id}",
-            get(get_group).delete(delete_group_handler),
+            get(get_group)
+                .put(update_group)
+                .delete(delete_group_handler),
         )
         .route(
             "/v1/groups/{group_id}/members",
@@ -30,20 +31,19 @@ pub fn group_routes() -> Router<Arc<AppState>> {
             "/v1/groups/{group_id}/members/{member_id}",
             put(update_member).delete(delete_member_handler),
         )
-        .route("/v1/groups/{group_id}/publish", post(publish_group))
-}
-
-#[derive(Debug, Deserialize, Default, Clone)]
-pub(crate) struct RetryInput {
-    #[serde(default)]
-    max_retries: Option<u32>,
-    #[serde(default)]
-    retry_backoff: Option<broker_proto::RetryBackoff>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateGroupRequest {
     pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateGroupRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub paused: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,23 +89,6 @@ fn default_period() -> u64 {
     60
 }
 
-#[derive(Debug, Deserialize)]
-pub struct GroupPublishRequest {
-    #[serde(default)]
-    pub key: String,
-    #[serde(deserialize_with = "broker_partition::payload::deserialize_flexible_payload")]
-    pub body: String,
-    #[serde(default)]
-    pub body_encoding: Option<String>,
-    pub idempotency_key: Option<String>,
-    #[serde(default)]
-    pub priority: Option<u8>,
-    #[serde(flatten)]
-    pub retry: RetryInput,
-    #[serde(flatten)]
-    pub outbound: OutboundHttpFields,
-}
-
 #[derive(Debug, Serialize)]
 pub struct GroupResponse {
     pub group_id: Uuid,
@@ -141,24 +124,6 @@ pub struct MemberResponse {
 #[derive(Debug, Serialize)]
 pub struct MemberListResponse {
     pub members: Vec<MemberResponse>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GroupPublishResponse {
-    pub group_id: Uuid,
-    pub accepted: usize,
-    pub deliveries: Vec<GroupDeliveryRef>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GroupDeliveryRef {
-    pub member_id: Uuid,
-    pub message_id: Option<Uuid>,
-    pub duplicate: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
 }
 
 fn to_group_response(g: DispatchGroup) -> GroupResponse {
@@ -220,6 +185,31 @@ async fn get_group(
     }))
 }
 
+async fn update_group(
+    State(state): State<Arc<AppState>>,
+    Path(group_id): Path<Uuid>,
+    Json(req): Json<UpdateGroupRequest>,
+) -> Result<Json<GroupResponse>, GroupApiError> {
+    let mut group = state
+        .broker
+        .get_group(group_id)?
+        .ok_or(GroupApiError::GroupNotFound(group_id))?;
+    if let Some(name) = req.name {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(GroupApiError::Invalid("name must not be empty".into()));
+        }
+        group.name = name;
+    }
+    if let Some(paused) = req.paused {
+        group.paused = paused;
+    }
+    group.updated_at_ms = chrono::Utc::now().timestamp_millis();
+    state.broker.upsert_group_catalog(group.clone())?;
+    crate::cluster::replicate_group_catalog(&state, group.clone()).await;
+    Ok(Json(to_group_response(group)))
+}
+
 async fn delete_group_handler(
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<Uuid>,
@@ -255,6 +245,8 @@ async fn add_member(
     Path(group_id): Path<Uuid>,
     Json(req): Json<AddMemberRequest>,
 ) -> Result<(StatusCode, Json<MemberResponse>), GroupApiError> {
+    broker_dispatch::validate_destination_url(&req.url)
+        .map_err(|e| GroupApiError::Invalid(e.to_string()))?;
     let member = state.broker.add_group_member(
         group_id,
         req.name,
@@ -285,6 +277,8 @@ async fn update_member(
         member.name = name;
     }
     if let Some(url) = req.url {
+        broker_dispatch::validate_destination_url(&url)
+            .map_err(|e| GroupApiError::Invalid(e.to_string()))?;
         member.url = url;
     }
     if let Some(secret) = req.secret {
@@ -327,109 +321,13 @@ async fn delete_member_handler(
     Ok((StatusCode::OK, Json(to_member_response(removed))))
 }
 
-async fn publish_group(
-    State(state): State<Arc<AppState>>,
-    ingest: Option<axum::extract::Extension<crate::metering::IngestAuth>>,
-    #[cfg(feature = "cloud")] plan: Option<
-        axum::extract::Extension<broker_control_plane::PlanLimits>,
-    >,
-    Path(group_id): Path<Uuid>,
-    Json(req): Json<GroupPublishRequest>,
-) -> Result<(StatusCode, Json<GroupPublishResponse>), GroupApiError> {
-    if state.broker.get_group(group_id)?.is_none() {
-        return Err(GroupApiError::GroupNotFound(group_id));
-    }
-    let members = state.broker.active_group_members(group_id)?;
-    if members.is_empty() {
-        return Err(GroupApiError::NoActiveMembers);
-    }
-
-    let mut base = PublishRequest {
-        topic: String::new(),
-        queue_id: None,
-        group_id: None,
-        group_member_id: None,
-        routing_key: req.key,
-        payload: req.body,
-        payload_encoding: req.body_encoding,
-        idempotency_key: req.idempotency_key,
-        delay_ms: None,
-        priority: req.priority,
-        flow_id: None,
-        url: None,
-        secret: None,
-        destination: None,
-        flow: None,
-        parallelism: None,
-        max_retries: req.retry.max_retries,
-        retry_backoff: req.retry.retry_backoff,
-        method: None,
-        headers: None,
-        sign: None,
-        request: None,
-    };
-    req.outbound.apply_to(&mut base);
-
-    #[cfg(feature = "cloud")]
-    if state.uses_cloud_auth() {
-        if let (Some(auth), Some(plan)) =
-            (ingest.as_ref().map(|e| e.0), plan.as_ref().map(|e| &e.0))
-        {
-            let fanout = members.len();
-            crate::metering::check_cloud_batch_messages_cap(&state, auth.tenant_id, plan, fanout)
-                .await
-                .map_err(GroupApiError::Publish)?;
-            if req.body.len() as u64 > plan.max_message_bytes {
-                return Err(GroupApiError::Publish(crate::routes::ApiError::BadRequest(
-                    format!(
-                        "message exceeds plan limit of {} bytes",
-                        plan.max_message_bytes
-                    ),
-                )));
-            }
-        }
-    }
-
-    let mut deliveries = Vec::new();
-    for member in members {
-        let member_req = state
-            .broker
-            .group_member_publish_request(group_id, &member, &base);
-        let meter = crate::metering::ingest_meter(ingest.map(|e| e.0), member_req.payload.len());
-        let resp = crate::cluster::publish_with_cluster(&state, member_req, meter)
-            .await
-            .map_err(GroupApiError::Publish)?;
-        crate::cluster::enqueue_dispatch_after_publish(&state, &resp);
-        deliveries.push(to_delivery_ref(member.id, &resp));
-    }
-
-    let accepted = deliveries.iter().filter(|d| !d.duplicate).count();
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(GroupPublishResponse {
-            group_id,
-            accepted,
-            deliveries,
-        }),
-    ))
-}
-
-fn to_delivery_ref(member_id: Uuid, resp: &PublishResponse) -> GroupDeliveryRef {
-    GroupDeliveryRef {
-        member_id,
-        message_id: resp.message_id,
-        duplicate: resp.duplicate,
-        shard: resp.partition,
-        seq: resp.offset,
-    }
-}
-
 #[derive(Debug)]
 enum GroupApiError {
     GroupNotFound(Uuid),
     MemberNotFound(Uuid),
     NoActiveMembers,
     DuplicateName(String),
+    Invalid(String),
     Publish(ApiError),
 }
 
@@ -469,6 +367,7 @@ impl IntoResponse for GroupApiError {
             GroupApiError::DuplicateName(n) => {
                 (StatusCode::CONFLICT, format!("duplicate group name: {n}"))
             }
+            GroupApiError::Invalid(msg) => (StatusCode::BAD_REQUEST, msg),
             GroupApiError::Publish(e) => return e.into_response(),
         };
         let body = serde_json::json!({ "error": msg });

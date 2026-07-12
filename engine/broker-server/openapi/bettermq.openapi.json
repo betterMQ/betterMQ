@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "BetterMQ API",
-    "description": "HTTP webhook broker — publish, queues, enqueue, flow control, cron, and DLQ. Authenticate with a panel-generated `sk_local_…` Bearer token.",
+    "description": "HTTP message broker \u2014 publish, queues, enqueue, flow control, cron, and DLQ. Authenticate with a panel-generated `sk_local_\u2026` Bearer token.",
     "version": "0.3.0",
     "license": {
       "name": "MIT OR Apache-2.0"
@@ -61,6 +61,14 @@
     {
       "name": "Gateway",
       "description": "Stateless batch ingest"
+    },
+    {
+      "name": "Auth",
+      "description": "Local panel auth / API token setup (no bearer required)"
+    },
+    {
+      "name": "Infra",
+      "description": "Self-host config, storage, and HA cluster management"
     }
   ],
   "components": {
@@ -68,7 +76,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "API token (`Authorization: Bearer sk_local_…`)"
+        "description": "API token (`Authorization: Bearer sk_local_\u2026`)"
       }
     },
     "schemas": {
@@ -98,17 +106,23 @@
       "PublishBody": {
         "type": "object",
         "required": [
-          "url",
-          "secret",
-          "key"
+          "body"
         ],
+        "description": "Publish to a URL (url+secret) or fan-out to a group (group_id). Exactly one destination mode.",
         "properties": {
           "url": {
             "type": "string",
-            "format": "uri"
+            "format": "uri",
+            "description": "Direct destination URL (mutually exclusive with group_id)"
           },
           "secret": {
-            "type": "string"
+            "type": "string",
+            "description": "HMAC secret required with url"
+          },
+          "group_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Fan-out group (mutually exclusive with url)"
           },
           "key": {
             "type": "string"
@@ -122,11 +136,19 @@
           },
           "flow_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Pre-created flow profile (direct publish only). Prefer inline flowControl."
+          },
+          "flow": {
+            "$ref": "#/components/schemas/FlowControlBody"
+          },
+          "flowControl": {
+            "$ref": "#/components/schemas/FlowControlBody",
+            "description": "Alias for flow \u2014 ensure/reuse profile by key on publish"
           },
           "delay": {
             "type": "integer",
-            "description": "Delay in milliseconds"
+            "description": "Delay in milliseconds (applies to url and group_id)"
           },
           "max_retries": {
             "type": "integer",
@@ -145,23 +167,60 @@
               "PATCH",
               "DELETE",
               "HEAD"
-            ]
+            ],
+            "description": "Outbound HTTP method (default POST)"
           },
           "headers": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
+            "description": "Outbound headers as an object map, or curl-style array of [name, value] / \"Name: value\" strings",
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
           },
           "sign": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "When true, add BetterMQ-Signature + BetterMQ-Timestamp"
+          },
+          "body_encoding": {
+            "type": "string",
+            "description": "Optional encoding hint for body (e.g. base64)"
+          },
+          "retry_backoff": {
+            "$ref": "#/components/schemas/RetryBackoff",
+            "description": "Backoff between retries (camelCase: kind, initialMs, maxMs, multiplier)"
+          },
+          "request": {
+            "$ref": "#/components/schemas/HttpDeliveryInput",
+            "description": "Nested curl-style overrides (method/headers/sign)"
           }
         }
       },
       "EnqueueBody": {
         "type": "object",
         "required": [
-          "key"
+          "body"
         ],
         "properties": {
           "queue_id": {
@@ -182,24 +241,80 @@
             "type": "string",
             "format": "uuid"
           },
+          "flow": {
+            "$ref": "#/components/schemas/FlowControlBody"
+          },
+          "flowControl": {
+            "$ref": "#/components/schemas/FlowControlBody",
+            "description": "Alias for flow"
+          },
           "delay": {
             "type": "integer"
           },
           "max_retries": {
             "type": "integer",
+            "default": 0,
             "description": "Retry attempts after the first failure. 0 = no retries (single delivery attempt)."
           },
           "idempotency_key": {
             "type": "string"
           },
           "method": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE",
+              "HEAD"
+            ],
+            "description": "Outbound HTTP method (default POST)"
           },
           "headers": {
-            "type": "object"
+            "description": "Outbound headers as an object map, or curl-style array of [name, value] / \"Name: value\" strings",
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
           },
           "sign": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "When true, add BetterMQ-Signature + BetterMQ-Timestamp"
+          },
+          "body_encoding": {
+            "type": "string",
+            "description": "Optional encoding hint for body (e.g. base64)"
+          },
+          "retry_backoff": {
+            "$ref": "#/components/schemas/RetryBackoff",
+            "description": "Backoff between retries (camelCase: kind, initialMs, maxMs, multiplier)"
+          },
+          "request": {
+            "$ref": "#/components/schemas/HttpDeliveryInput",
+            "description": "Nested curl-style overrides (method/headers/sign)"
           }
         }
       },
@@ -259,6 +374,19 @@
           },
           "scheduled": {
             "$ref": "#/components/schemas/ScheduledInfo"
+          },
+          "group_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "accepted": {
+            "type": "integer"
+          },
+          "deliveries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupDeliveryRef"
+            }
           }
         }
       },
@@ -347,6 +475,25 @@
           },
           "sign": {
             "type": "boolean"
+          },
+          "group_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "group_member_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow": {
+            "$ref": "#/components/schemas/FlowControlBody"
+          },
+          "parallelism": {
+            "type": "integer",
+            "description": "Legacy inline parallelism"
+          },
+          "request": {
+            "$ref": "#/components/schemas/HttpDeliveryInput",
+            "description": "Nested curl-style overrides (method/headers/sign)"
           }
         }
       },
@@ -373,7 +520,8 @@
             "type": "number",
             "default": 2
           }
-        }
+        },
+        "description": "Backoff between delivery attempts. JSON keys are camelCase (kind, initialMs, maxMs, multiplier) matching the broker wire format."
       },
       "FlowProfileResponse": {
         "type": "object",
@@ -571,7 +719,9 @@
           "message_id",
           "key",
           "body",
-          "published_at_ms"
+          "published_at_ms",
+          "partition",
+          "offset"
         ],
         "properties": {
           "message_id": {
@@ -593,6 +743,18 @@
           },
           "destination_url": {
             "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the message was moved to the DLQ (HTTP status, transport error, retries exhausted, \u2026)"
+          },
+          "partition": {
+            "type": "integer",
+            "format": "uint32"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "uint64"
           }
         }
       },
@@ -628,29 +790,6 @@
           }
         }
       },
-      "GroupPublishResponse": {
-        "type": "object",
-        "required": [
-          "group_id",
-          "accepted",
-          "deliveries"
-        ],
-        "properties": {
-          "group_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "accepted": {
-            "type": "integer"
-          },
-          "deliveries": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/GroupDeliveryRef"
-            }
-          }
-        }
-      },
       "GroupDeliveryRef": {
         "type": "object",
         "required": [
@@ -674,6 +813,9 @@
           },
           "seq": {
             "type": "integer"
+          },
+          "scheduled": {
+            "$ref": "#/components/schemas/ScheduledInfo"
           }
         }
       },
@@ -694,6 +836,15 @@
           },
           "secret": {
             "type": "string"
+          },
+          "max_retries": {
+            "type": "integer",
+            "default": 0,
+            "description": "Retry attempts after the first failure. 0 = no retries (single delivery attempt)."
+          },
+          "retry_backoff": {
+            "$ref": "#/components/schemas/RetryBackoff",
+            "description": "Backoff between retries (camelCase: kind, initialMs, maxMs, multiplier)"
           }
         }
       },
@@ -772,6 +923,19 @@
           }
         }
       },
+      "UpdateGroupBody": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Rename the group"
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "When true, fan-out publish skips all members of this group"
+          }
+        }
+      },
       "AddGroupMemberBody": {
         "type": "object",
         "required": [
@@ -805,34 +969,17 @@
           }
         }
       },
-      "GroupPublishBody": {
+      "UpdateGroupMemberBody": {
         "type": "object",
-        "required": [
-          "body"
-        ],
         "properties": {
-          "key": {
+          "name": {
             "type": "string"
           },
-          "body": {},
-          "idempotency_key": {
-            "type": "string"
+          "url": {
+            "type": "string",
+            "format": "uri"
           },
-          "priority": {
-            "type": "integer"
-          }
-        }
-      },
-      "CreateFlowBody": {
-        "type": "object",
-        "required": [
-          "key",
-          "parallelism",
-          "rate",
-          "period_secs"
-        ],
-        "properties": {
-          "key": {
+          "secret": {
             "type": "string"
           },
           "parallelism": {
@@ -844,6 +991,73 @@
           },
           "period_secs": {
             "type": "integer"
+          },
+          "flow_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set to null to clear the member flow_key"
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "When true, this member is skipped during group fan-out"
+          }
+        }
+      },
+      "FlowControlBody": {
+        "type": "object",
+        "description": "Inline flow control on publish/enqueue. Reuses an existing profile when key + limits match; otherwise creates or updates. Also accepted as `flow`.",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Flow-control key. Defaults to the message routing key when omitted."
+          },
+          "parallelism": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": "Max concurrent in-flight deliveries for this key"
+          },
+          "rate": {
+            "type": "integer",
+            "default": 0,
+            "description": "Max deliveries started per period. 0 = no rate limit."
+          },
+          "period_secs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 60,
+            "description": "Rate window in seconds. Alias: period."
+          },
+          "period": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Alias for period_secs"
+          }
+        }
+      },
+      "CreateFlowBody": {
+        "type": "object",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "parallelism": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "rate": {
+            "type": "integer",
+            "default": 0
+          },
+          "period_secs": {
+            "type": "integer",
+            "default": 60
           }
         }
       },
@@ -875,6 +1089,23 @@
           },
           "healthy_peers": {
             "type": "integer"
+          },
+          "rss_mb": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "memory_limit_mb": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "memory_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "cpu_percent": {
+            "type": "number",
+            "format": "float"
           }
         }
       },
@@ -884,15 +1115,7 @@
           "hosts": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "host": {
-                  "type": "string"
-                },
-                "remaining_ms": {
-                  "type": "integer"
-                }
-              }
+              "$ref": "#/components/schemas/BlockedHostEntry"
             }
           }
         }
@@ -925,7 +1148,6 @@
       "CreateCronBody": {
         "type": "object",
         "required": [
-          "key",
           "body"
         ],
         "properties": {
@@ -953,6 +1175,80 @@
           "flow_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Direct webhook URL (preferred over queue)"
+          },
+          "secret": {
+            "type": "string",
+            "description": "HMAC secret required with url"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "body_encoding": {
+            "type": "string",
+            "description": "Optional encoding hint for body (e.g. base64)"
+          },
+          "max_retries": {
+            "type": "integer",
+            "default": 0,
+            "description": "Retry attempts after the first failure. 0 = no retries (single delivery attempt)."
+          },
+          "retry_backoff": {
+            "$ref": "#/components/schemas/RetryBackoff",
+            "description": "Backoff between retries (camelCase: kind, initialMs, maxMs, multiplier)"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE",
+              "HEAD"
+            ],
+            "description": "Outbound HTTP method (default POST)"
+          },
+          "headers": {
+            "description": "Outbound headers as an object map, or curl-style array of [name, value] / \"Name: value\" strings",
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "sign": {
+            "type": "boolean",
+            "description": "When true, add BetterMQ-Signature + BetterMQ-Timestamp"
+          },
+          "request": {
+            "$ref": "#/components/schemas/HttpDeliveryInput",
+            "description": "Nested curl-style overrides (method/headers/sign)"
           }
         }
       },
@@ -1127,6 +1423,763 @@
             }
           }
         }
+      },
+      "HttpDeliveryInput": {
+        "type": "object",
+        "description": "Optional nested curl-style outbound overrides on publish/enqueue/cron",
+        "properties": {
+          "method": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "sign": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BlockHostRequest": {
+        "type": "object",
+        "required": [
+          "host"
+        ],
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "Host to block (e.g. https://api.example.com:443)"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "description": "Block duration in milliseconds (default: 30 minutes)"
+          }
+        }
+      },
+      "PinFlowBody": {
+        "type": "object",
+        "properties": {
+          "parallelism": {
+            "type": "integer"
+          },
+          "rate": {
+            "type": "integer"
+          },
+          "period_secs": {
+            "type": "integer"
+          }
+        }
+      },
+      "UnpinFlowBody": {
+        "type": "object",
+        "properties": {
+          "parallelism": {
+            "type": "boolean",
+            "default": false,
+            "description": "Clear pinned parallelism"
+          },
+          "rate": {
+            "type": "boolean",
+            "default": false,
+            "description": "Clear pinned rate"
+          }
+        }
+      },
+      "UpsertFlowControlBody": {
+        "type": "object",
+        "description": "Body for PUT /v1/flow/{key}. Path supplies the key; do not send key here.",
+        "properties": {
+          "parallelism": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "rate": {
+            "type": "integer",
+            "default": 0,
+            "description": "0 = no rate limit"
+          },
+          "period_secs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 60
+          }
+        }
+      },
+      "BlockedHostEntry": {
+        "type": "object",
+        "required": [
+          "host",
+          "remaining_ms"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "remaining_ms": {
+            "type": "integer",
+            "format": "uint64"
+          }
+        }
+      },
+      "AuthConfigResponse": {
+        "type": "object",
+        "required": [
+          "mode",
+          "configured"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "local",
+              "control_plane"
+            ]
+          },
+          "configured": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LocalAuthStatusResponse": {
+        "type": "object",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LocalAuthPasswordBody": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "setup_token": {
+            "type": "string",
+            "description": "Optional when BETTERMQ_SETUP_TOKEN is set; prefer header x-bettermq-setup-token"
+          }
+        }
+      },
+      "LocalAuthTokenResponse": {
+        "type": "object",
+        "required": [
+          "token",
+          "show_once"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "show_once": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ClusterNodeInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "public_url",
+          "id"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "public_url": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "BootstrapResponse": {
+        "type": "object",
+        "required": [
+          "cluster_id",
+          "generation",
+          "nodes"
+        ],
+        "properties": {
+          "cluster_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "generation": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClusterNodeInfo"
+            }
+          }
+        }
+      },
+      "ClusterRegisterRequest": {
+        "type": "object",
+        "required": [
+          "join_token",
+          "public_url",
+          "node_name"
+        ],
+        "properties": {
+          "join_token": {
+            "type": "string"
+          },
+          "public_url": {
+            "type": "string"
+          },
+          "node_name": {
+            "type": "string"
+          }
+        }
+      },
+      "ClusterRegisterResponse": {
+        "type": "object",
+        "required": [
+          "cluster_id",
+          "nodes",
+          "generation"
+        ],
+        "properties": {
+          "cluster_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "generation": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClusterNodeInfo"
+            }
+          }
+        }
+      },
+      "S3Config": {
+        "type": "object",
+        "required": [
+          "endpoint",
+          "bucket",
+          "accessKey",
+          "secretKey"
+        ],
+        "description": "camelCase S3 settings (storage update body / config view)",
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "bucket": {
+            "type": "string"
+          },
+          "payloadBucket": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "accessKey": {
+            "type": "string"
+          },
+          "secretKey": {
+            "type": "string",
+            "description": "Send \u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 to keep the existing secret"
+          },
+          "region": {
+            "type": "string",
+            "default": "auto"
+          }
+        }
+      },
+      "S3ConfigView": {
+        "type": "object",
+        "required": [
+          "endpoint",
+          "bucket",
+          "accessKey",
+          "secretKey"
+        ],
+        "description": "camelCase S3 settings (storage update body / config view)",
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "bucket": {
+            "type": "string"
+          },
+          "payloadBucket": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "accessKey": {
+            "type": "string"
+          },
+          "secretKey": {
+            "type": "string",
+            "description": "Send \u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 to keep the existing secret"
+          },
+          "region": {
+            "type": "string",
+            "default": "auto"
+          }
+        }
+      },
+      "StorageConfigView": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "local"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "mode",
+              "s3"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "slate"
+                ]
+              },
+              "s3": {
+                "$ref": "#/components/schemas/S3ConfigView"
+              }
+            }
+          }
+        ]
+      },
+      "NodeSection": {
+        "type": "object",
+        "required": [
+          "name",
+          "publicUrl"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "listen": {
+            "type": "string",
+            "default": "0.0.0.0:8080"
+          },
+          "publicUrl": {
+            "type": "string"
+          }
+        }
+      },
+      "ClusterConfigSection": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "publicUrl": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "sharedMetaDir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BetterMqConfigView": {
+        "type": "object",
+        "description": "Managed bettermq.json view (camelCase; secrets redacted)",
+        "required": [
+          "version",
+          "node",
+          "dataDir",
+          "storage",
+          "configPath",
+          "managed"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeSection"
+          },
+          "dataDir": {
+            "type": "string"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/StorageConfigView"
+          },
+          "cluster": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ClusterConfigSection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configPath": {
+            "type": "string"
+          },
+          "managed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "InfraStatusResponse": {
+        "type": "object",
+        "required": [
+          "managed_config",
+          "needs_restart",
+          "active_storage",
+          "cluster",
+          "join_token_active",
+          "is_cluster_seed",
+          "public_url",
+          "node_name"
+        ],
+        "properties": {
+          "managed_config": {
+            "type": "boolean"
+          },
+          "needs_restart": {
+            "type": "boolean"
+          },
+          "active_storage": {
+            "type": "string",
+            "enum": [
+              "local",
+              "slate"
+            ]
+          },
+          "pending_storage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pending storage mode after config change: local | slate | null"
+          },
+          "cluster": {
+            "$ref": "#/components/schemas/ClusterStatusResponse"
+          },
+          "join_token_active": {
+            "type": "boolean"
+          },
+          "is_cluster_seed": {
+            "type": "boolean"
+          },
+          "public_url": {
+            "type": "string"
+          },
+          "node_name": {
+            "type": "string"
+          }
+        }
+      },
+      "NodeUpdateRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "public_url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "public_url": {
+            "type": "string"
+          },
+          "listen": {
+            "type": "string",
+            "default": "0.0.0.0:8080"
+          }
+        }
+      },
+      "NodeUpdateResponse": {
+        "type": "object",
+        "required": [
+          "config",
+          "needs_restart",
+          "message"
+        ],
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/BetterMqConfigView"
+          },
+          "needs_restart": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "StorageUpdateRequest": {
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "local",
+              "slate",
+              "s3"
+            ]
+          },
+          "s3": {
+            "$ref": "#/components/schemas/S3Config"
+          }
+        }
+      },
+      "StorageUpdateResponse": {
+        "type": "object",
+        "required": [
+          "saved",
+          "needs_restart",
+          "message"
+        ],
+        "properties": {
+          "saved": {
+            "type": "boolean"
+          },
+          "needs_restart": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "S3TestRequest": {
+        "type": "object",
+        "required": [
+          "endpoint",
+          "bucket"
+        ],
+        "description": "snake_case (unlike S3Config camelCase)",
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "bucket": {
+            "type": "string"
+          },
+          "access_key": {
+            "type": "string",
+            "default": ""
+          },
+          "secret_key": {
+            "type": "string",
+            "default": ""
+          },
+          "region": {
+            "type": "string",
+            "default": "auto"
+          }
+        }
+      },
+      "S3TestResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ClusterCreateResponse": {
+        "type": "object",
+        "required": [
+          "join_token",
+          "expires_at_ms",
+          "needs_restart",
+          "message"
+        ],
+        "properties": {
+          "join_token": {
+            "type": "string"
+          },
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "needs_restart": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ClusterJoinRequest": {
+        "type": "object",
+        "required": [
+          "seed_url",
+          "join_token",
+          "public_url",
+          "node_name"
+        ],
+        "properties": {
+          "seed_url": {
+            "type": "string"
+          },
+          "join_token": {
+            "type": "string"
+          },
+          "public_url": {
+            "type": "string"
+          },
+          "node_name": {
+            "type": "string"
+          }
+        }
+      },
+      "ClusterJoinResponse": {
+        "type": "object",
+        "required": [
+          "joined",
+          "node_count",
+          "needs_restart",
+          "message"
+        ],
+        "properties": {
+          "joined": {
+            "type": "boolean"
+          },
+          "node_count": {
+            "type": "integer"
+          },
+          "needs_restart": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "PeerTestRequest": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "PeerTestResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ClusterRemoveNodeRequest": {
+        "type": "object",
+        "required": [
+          "node_name"
+        ],
+        "properties": {
+          "node_name": {
+            "type": "string"
+          }
+        }
+      },
+      "ClusterRemoveNodeResponse": {
+        "type": "object",
+        "required": [
+          "removed",
+          "node_count",
+          "needs_restart",
+          "peers_notified",
+          "message"
+        ],
+        "properties": {
+          "removed": {
+            "type": "boolean"
+          },
+          "node_count": {
+            "type": "integer"
+          },
+          "needs_restart": {
+            "type": "boolean"
+          },
+          "peers_notified": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
       }
     }
   },
@@ -1208,8 +2261,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized when BETTERMQ_METRICS_TOKEN is set and token missing/invalid"
           }
-        }
+        },
+        "description": "Optional auth via Authorization: Bearer <token> or x-bettermq-metrics-token when BETTERMQ_METRICS_TOKEN is configured."
       }
     },
     "/v1/publish": {
@@ -1218,7 +2275,7 @@
           "Publish"
         ],
         "operationId": "publish",
-        "summary": "Publish (1:1 webhook)",
+        "summary": "Publish to a URL or fan-out group",
         "requestBody": {
           "required": true,
           "content": {
@@ -1250,7 +2307,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Provide either url+secret (1:1) or group_id (fan-out). Shared options: delay, retries, idempotency, priority, outbound HTTP fields."
       }
     },
     "/v1/publish/{destination}": {
@@ -1260,7 +2318,7 @@
         ],
         "operationId": "publishGet",
         "summary": "Publish via GET (destination in path)",
-        "description": "Axum matches `{*destination}` — multi-segment URL-encoded paths are supported.",
+        "description": "Axum matches `{*destination}` \u2014 multi-segment URL-encoded paths are supported. Deprecated: query `secret` leaks via logs/Referer. Prefer POST /v1/publish. Query secrets require BETTERMQ_ALLOW_QUERY_SECRET=1.",
         "parameters": [
           {
             "name": "destination",
@@ -1269,10 +2327,89 @@
             "schema": {
               "type": "string"
             },
-            "description": "URL-encoded destination URL (may contain slashes)"
+            "description": "URL-encoded destination URL (may contain slashes); must start with http:// or https://"
+          },
+          {
+            "name": "secret",
+            "in": "query",
+            "required": true,
+            "deprecated": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "HMAC secret (deprecated; requires BETTERMQ_ALLOW_QUERY_SECRET=1)"
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "idempotency_key",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "delay",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "max_retries",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "method",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sign",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
+          "200": {
+            "description": "Duplicate idempotency key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptResponse"
+                }
+              }
+            }
+          },
           "202": {
             "description": "Accepted",
             "content": {
@@ -1282,6 +2419,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Missing/disabled query secret or invalid destination"
           }
         }
       }
@@ -1570,6 +2710,16 @@
           {
             "name": "queue_id",
             "in": "query",
+            "description": "Queue/endpoint owner id. Alias: endpoint_id. Exactly one of queue_id, flow_id, or group_member_id is required.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "description": "Alias for queue_id",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -1578,6 +2728,7 @@
           {
             "name": "flow_id",
             "in": "query",
+            "description": "Flow profile owner id (maps to flow_profile_id in Rust)",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -1586,6 +2737,7 @@
           {
             "name": "group_member_id",
             "in": "query",
+            "description": "Group member owner id",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -1623,6 +2775,16 @@
           {
             "name": "queue_id",
             "in": "query",
+            "description": "Queue/endpoint owner id. Alias: endpoint_id. Exactly one of queue_id, flow_id, or group_member_id is required.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "description": "Alias for queue_id",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -1631,6 +2793,7 @@
           {
             "name": "flow_id",
             "in": "query",
+            "description": "Flow profile owner id (maps to flow_profile_id in Rust)",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -1639,6 +2802,7 @@
           {
             "name": "group_member_id",
             "in": "query",
+            "description": "Group member owner id",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -1650,7 +2814,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateFlowBody"
+                "$ref": "#/components/schemas/UpsertFlowControlBody"
               }
             }
           }
@@ -1683,6 +2847,42 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "queue_id",
+            "in": "query",
+            "description": "Queue/endpoint owner id. Alias: endpoint_id. Exactly one of queue_id, flow_id, or group_member_id is required.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "description": "Alias for queue_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "description": "Flow profile owner id (maps to flow_profile_id in Rust)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "group_member_id",
+            "in": "query",
+            "description": "Group member owner id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -1705,6 +2905,42 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "queue_id",
+            "in": "query",
+            "description": "Queue/endpoint owner id. Alias: endpoint_id. Exactly one of queue_id, flow_id, or group_member_id is required.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "description": "Alias for queue_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "description": "Flow profile owner id (maps to flow_profile_id in Rust)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "group_member_id",
+            "in": "query",
+            "description": "Group member owner id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -1729,6 +2965,42 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "queue_id",
+            "in": "query",
+            "description": "Queue/endpoint owner id. Alias: endpoint_id. Exactly one of queue_id, flow_id, or group_member_id is required.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "description": "Alias for queue_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "description": "Flow profile owner id (maps to flow_profile_id in Rust)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "group_member_id",
+            "in": "query",
+            "description": "Group member owner id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -1752,11 +3024,56 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "queue_id",
+            "in": "query",
+            "description": "Queue/endpoint owner id. Alias: endpoint_id. Exactly one of queue_id, flow_id, or group_member_id is required.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "description": "Alias for queue_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "description": "Flow profile owner id (maps to flow_profile_id in Rust)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "group_member_id",
+            "in": "query",
+            "description": "Group member owner id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
           "204": {
             "description": "Pinned"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PinFlowBody"
+              }
+            }
           }
         }
       }
@@ -1775,11 +3092,56 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "queue_id",
+            "in": "query",
+            "description": "Queue/endpoint owner id. Alias: endpoint_id. Exactly one of queue_id, flow_id, or group_member_id is required.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "description": "Alias for queue_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "description": "Flow profile owner id (maps to flow_profile_id in Rust)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "group_member_id",
+            "in": "query",
+            "description": "Group member owner id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
           "204": {
             "description": "Unpinned"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnpinFlowBody"
+              }
+            }
           }
         }
       }
@@ -2037,7 +3399,7 @@
           {
             "name": "queue",
             "in": "query",
-            "description": "Primary queue name (`jobs` → `jobs.__dlq`).",
+            "description": "Primary queue name (`jobs` \u2192 `jobs.__dlq`).",
             "schema": {
               "type": "string"
             }
@@ -2045,7 +3407,7 @@
           {
             "name": "dlq_topic",
             "in": "query",
-            "description": "Full DLQ topic (`__direct.__dlq`, `__group.{id}.{member}.__dlq`, …). Use when not a named queue.",
+            "description": "Full DLQ topic (`__direct.__dlq`, `__group.{id}.{member}.__dlq`, \u2026). Use when not a named queue.",
             "schema": {
               "type": "string"
             }
@@ -2069,6 +3431,50 @@
                 }
               }
             }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "DLQ"
+        ],
+        "operationId": "deleteDlqMessage",
+        "summary": "Purge a single DLQ message",
+        "parameters": [
+          {
+            "name": "dlq_topic",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Full DLQ topic (must end with .__dlq)"
+          },
+          {
+            "name": "partition",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "400": {
+            "description": "Invalid topic or message not found"
           }
         }
       }
@@ -2248,6 +3654,47 @@
           }
         }
       },
+      "put": {
+        "tags": [
+          "Groups"
+        ],
+        "operationId": "updateGroup",
+        "summary": "Update group (rename or pause)",
+        "description": "Pause a group to skip fan-out for all members, or rename it. Only provided fields are updated.",
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateGroupBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupRecord"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "Groups"
@@ -2358,6 +3805,7 @@
         ],
         "operationId": "updateGroupMember",
         "summary": "Update member",
+        "description": "Partial update. Set `paused: true` to skip this destination during group fan-out.",
         "parameters": [
           {
             "name": "group_id",
@@ -2378,6 +3826,16 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateGroupMemberBody"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -2431,48 +3889,6 @@
         }
       }
     },
-    "/v1/groups/{group_id}/publish": {
-      "post": {
-        "tags": [
-          "Groups"
-        ],
-        "operationId": "publishGroup",
-        "summary": "Fan-out publish to all active members",
-        "parameters": [
-          {
-            "name": "group_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GroupPublishBody"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "description": "Accepted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GroupPublishResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/cluster": {
       "get": {
         "tags": [
@@ -2515,13 +3931,44 @@
         }
       }
     },
+    "/v1/destinations/block": {
+      "post": {
+        "tags": [
+          "Ops"
+        ],
+        "operationId": "blockHost",
+        "summary": "Operator override \u2014 manually block a destination host",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlockHostRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Blocked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockedHostEntry"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/destinations/unblock": {
       "post": {
         "tags": [
           "Ops"
         ],
         "operationId": "unblockHost",
-        "summary": "Operator override — unblock a host",
+        "summary": "Operator override \u2014 unblock a host",
         "requestBody": {
           "required": true,
           "content": {
@@ -2535,6 +3982,466 @@
         "responses": {
           "200": {
             "description": "Unblocked"
+          }
+        }
+      }
+    },
+    "/v1/auth/config": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "authConfig",
+        "summary": "Auth mode and configured state",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfigResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/local-auth/status": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "localAuthStatus",
+        "summary": "Whether local panel auth is configured",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalAuthStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/local-auth/setup": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "localAuthSetup",
+        "summary": "First-time local auth setup \u2014 returns API token once",
+        "security": [],
+        "parameters": [
+          {
+            "name": "x-bettermq-setup-token",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required when BETTERMQ_SETUP_TOKEN is set"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalAuthPasswordBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalAuthTokenResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/local-auth/regenerate": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "localAuthRegenerate",
+        "summary": "Rotate local API token (returns new token once)",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalAuthPasswordBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalAuthTokenResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/join/bootstrap": {
+      "get": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraJoinBootstrap",
+        "summary": "Bootstrap cluster membership for a joining node",
+        "security": [],
+        "description": "Auth via Authorization: Bearer <join_token>, header x-bettermq-join-token, or query token (avoid query \u2014 logs/referrers).",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "deprecated": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-bettermq-join-token",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BootstrapResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/cluster/register": {
+      "post": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraClusterRegister",
+        "summary": "Register a node into the cluster (join handshake)",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClusterRegisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterRegisterResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/status": {
+      "get": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraStatus",
+        "summary": "Infra / HA status for the control panel",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InfraStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/config": {
+      "get": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraGetConfig",
+        "summary": "Managed bettermq.json config view",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BetterMqConfigView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/node": {
+      "put": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraUpdateNode",
+        "summary": "Update node name / listen / public URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeUpdateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/storage": {
+      "put": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraUpdateStorage",
+        "summary": "Update storage mode (local / slate)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StorageUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageUpdateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/storage/test": {
+      "post": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraTestStorage",
+        "summary": "Test S3-compatible credentials",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S3TestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S3TestResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/cluster/create": {
+      "post": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraClusterCreate",
+        "summary": "Create HA cluster and issue join token",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterCreateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/cluster/join": {
+      "post": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraClusterJoin",
+        "summary": "Join an existing cluster via seed URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClusterJoinRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterJoinResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/cluster/sync": {
+      "post": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraClusterSync",
+        "summary": "Sync cluster membership from peers",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterRegisterResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/cluster/test-peer": {
+      "post": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraTestPeer",
+        "summary": "Probe a peer URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PeerTestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeerTestResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/infra/cluster/remove-node": {
+      "post": {
+        "tags": [
+          "Infra"
+        ],
+        "operationId": "infraClusterRemoveNode",
+        "summary": "Remove a node from the cluster",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClusterRemoveNodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterRemoveNodeResponse"
+                }
+              }
+            }
           }
         }
       }

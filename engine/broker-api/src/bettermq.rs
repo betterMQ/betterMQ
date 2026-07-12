@@ -85,8 +85,8 @@ pub struct EnqueueRequest {
     pub priority: Option<u8>,
     #[serde(default)]
     pub flow_id: Option<Uuid>,
-    /// Inline flow limits — upserts a profile by `flow.key`.
-    #[serde(default)]
+    /// Inline flow limits — ensure/reuse a profile by key (`flowControl` alias).
+    #[serde(default, alias = "flowControl")]
     pub flow: Option<FlowSpec>,
     #[serde(flatten)]
     pub retry: RetryInput,
@@ -94,11 +94,19 @@ pub struct EnqueueRequest {
     pub outbound: OutboundHttpFields,
 }
 
-/// One-off delivery to a URL (`POST /v1/publish`).
+/// One-off delivery to a URL **or** fan-out to a group (`POST /v1/publish`).
+/// Provide either `url` (+ `secret`) or `group_id` — not both.
 #[derive(Debug, Deserialize)]
 pub struct PublishJobRequest {
-    pub url: String,
-    pub secret: String,
+    /// Direct destination URL (mutually exclusive with `group_id`).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// HMAC secret for direct URL publish (required with `url`).
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// Fan-out group (mutually exclusive with `url`).
+    #[serde(default)]
+    pub group_id: Option<Uuid>,
     #[serde(default)]
     pub key: String,
     #[serde(deserialize_with = "broker_partition::payload::deserialize_flexible_payload")]
@@ -112,8 +120,9 @@ pub struct PublishJobRequest {
     pub priority: Option<u8>,
     #[serde(default)]
     pub flow_id: Option<Uuid>,
-    /// Inline flow limits — upserts a profile by `flow.key`.
-    #[serde(default)]
+    /// Inline flow limits — ensure/reuse a profile by key (direct publish only).
+    /// Alias: `flowControl`.
+    #[serde(default, alias = "flowControl")]
     pub flow: Option<FlowSpec>,
     #[serde(flatten)]
     pub retry: RetryInput,
@@ -213,6 +222,27 @@ pub struct EnqueueResponse {
     pub delivery: Option<DeliveryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduled: Option<ScheduledInfo>,
+    /// Present when publishing to a `group_id` (fan-out).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deliveries: Option<Vec<GroupDeliveryRef>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupDeliveryRef {
+    pub member_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<Uuid>,
+    pub duplicate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shard: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled: Option<ScheduledInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,6 +264,9 @@ pub struct DlqMessage {
     pub source_queue: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_url: Option<String>,
+    /// Why the message was moved to the DLQ (HTTP status, transport error, retries exhausted, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -314,7 +347,59 @@ fn to_publish_enqueue(req: EnqueueRequest) -> Result<PublishRequest, ApiError> {
     Ok(pr)
 }
 
-fn to_publish_job(req: PublishJobRequest) -> PublishRequest {
+fn to_publish_job(req: PublishJobRequest) -> Result<PublishRequest, ApiError> {
+    let has_url = req.url.as_ref().map(|u| !u.trim().is_empty()).unwrap_or(false);
+    let has_group = req.group_id.is_some();
+    match (has_url, has_group) {
+        (true, true) => {
+            return Err(ApiError::BadRequest(
+                "provide either url or group_id, not both".into(),
+            ));
+        }
+        (false, false) => {
+            return Err(ApiError::BadRequest(
+                "provide url (+ secret) or group_id".into(),
+            ));
+        }
+        _ => {}
+    }
+
+    if has_group {
+        let mut pr = PublishRequest {
+            topic: String::new(),
+            queue_id: None,
+            group_id: req.group_id,
+            group_member_id: None,
+            routing_key: req.key,
+            payload: req.body,
+            payload_encoding: req.body_encoding,
+            idempotency_key: req.idempotency_key,
+            delay_ms: req.delay,
+            priority: req.priority,
+            flow_id: None,
+            url: None,
+            secret: None,
+            destination: None,
+            flow: None,
+            parallelism: None,
+            max_retries: req.retry.max_retries,
+            retry_backoff: req.retry.retry_backoff.clone(),
+            method: None,
+            headers: None,
+            sign: None,
+            request: None,
+        };
+        req.outbound.apply_to(&mut pr);
+        return Ok(pr);
+    }
+
+    let url = req.url.unwrap_or_default();
+    let secret = req.secret.unwrap_or_default();
+    if secret.is_empty() {
+        return Err(ApiError::BadRequest(
+            "secret is required when publishing to a url".into(),
+        ));
+    }
     let mut pr = PublishRequest {
         topic: broker_partition::DIRECT_TOPIC.to_string(),
         queue_id: None,
@@ -327,8 +412,8 @@ fn to_publish_job(req: PublishJobRequest) -> PublishRequest {
         delay_ms: req.delay,
         priority: req.priority,
         flow_id: req.flow_id,
-        url: Some(req.url),
-        secret: Some(req.secret),
+        url: Some(url),
+        secret: Some(secret),
         destination: None,
         flow: None,
         parallelism: None,
@@ -340,7 +425,7 @@ fn to_publish_job(req: PublishJobRequest) -> PublishRequest {
         request: None,
     };
     req.outbound.apply_to(&mut pr);
-    pr
+    Ok(pr)
 }
 
 pub(crate) fn to_enqueue_response(inner: PublishResponse) -> EnqueueResponse {
@@ -354,12 +439,103 @@ pub(crate) fn to_enqueue_response(inner: PublishResponse) -> EnqueueResponse {
         duplicate: inner.duplicate,
         delivery,
         scheduled: inner.scheduled,
+        group_id: None,
+        accepted: None,
+        deliveries: None,
     }
 }
 
-fn parse_dlq_payload(body: &str) -> (Option<String>, Option<String>) {
+fn to_group_delivery_ref(member_id: Uuid, resp: &PublishResponse) -> GroupDeliveryRef {
+    GroupDeliveryRef {
+        member_id,
+        message_id: resp.message_id,
+        duplicate: resp.duplicate,
+        shard: resp.partition,
+        seq: resp.offset,
+        scheduled: resp.scheduled.clone(),
+    }
+}
+
+async fn publish_to_group(
+    state: Arc<AppState>,
+    ingest: Option<axum::extract::Extension<crate::metering::IngestAuth>>,
+    #[cfg(feature = "cloud")] plan: Option<
+        axum::extract::Extension<broker_control_plane::PlanLimits>,
+    >,
+    group_id: Uuid,
+    base: PublishRequest,
+) -> Result<(StatusCode, Json<EnqueueResponse>), ApiError> {
+    if state.broker.get_group(group_id)?.is_none() {
+        return Err(ApiError::BadRequest(format!("group not found: {group_id}")));
+    }
+    let members = state.broker.active_group_members(group_id)?;
+    if members.is_empty() {
+        return Err(ApiError::BadRequest(
+            "group has no active members".to_string(),
+        ));
+    }
+
+    #[cfg(feature = "cloud")]
+    if state.uses_cloud_auth() {
+        if let (Some(auth), Some(plan)) =
+            (ingest.as_ref().map(|e| e.0), plan.as_ref().map(|e| &e.0))
+        {
+            let fanout = members.len();
+            crate::metering::check_cloud_batch_messages_cap(&state, auth.tenant_id, plan, fanout)
+                .await?;
+            if base.payload.len() as u64 > plan.max_message_bytes {
+                return Err(ApiError::BadRequest(format!(
+                    "message exceeds plan limit of {} bytes",
+                    plan.max_message_bytes
+                )));
+            }
+        }
+    }
+
+    let mut deliveries = Vec::new();
+    for member in members {
+        let member_req = state
+            .broker
+            .group_member_publish_request(group_id, &member, &base);
+        #[cfg(feature = "cloud")]
+        let (_status, Json(inner)) =
+            publish(State(state.clone()), ingest.clone(), plan.clone(), Json(member_req)).await?;
+        #[cfg(not(feature = "cloud"))]
+        let (_status, Json(inner)) =
+            publish(State(state.clone()), ingest.clone(), Json(member_req)).await?;
+        deliveries.push(to_group_delivery_ref(member.id, &inner));
+    }
+
+    let accepted = deliveries
+        .iter()
+        .filter(|d| !d.duplicate && d.scheduled.is_none())
+        .count()
+        + deliveries.iter().filter(|d| d.scheduled.is_some()).count();
+    let any_scheduled = deliveries.iter().any(|d| d.scheduled.is_some());
+    let all_dup = deliveries.iter().all(|d| d.duplicate && d.scheduled.is_none());
+    let status = if all_dup && !any_scheduled {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((
+        status,
+        Json(EnqueueResponse {
+            message_id: None,
+            queue: broker_partition::group_topic(group_id),
+            duplicate: all_dup && !any_scheduled,
+            delivery: None,
+            scheduled: None,
+            group_id: Some(group_id),
+            accepted: Some(accepted),
+            deliveries: Some(deliveries),
+        }),
+    ))
+}
+
+fn parse_dlq_payload(body: &str) -> (Option<String>, Option<String>, Option<String>, String) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
-        return (None, None);
+        return (None, None, None, body.to_string());
     };
     let source_queue = v
         .get("source_queue")
@@ -369,12 +545,23 @@ fn parse_dlq_payload(body: &str) -> (Option<String>, Option<String>) {
         .get("destination_url")
         .and_then(|x| x.as_str())
         .map(str::to_string);
-    (source_queue, destination_url)
+    let reason = v
+        .get("reason")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let display_body = v
+        .get("body")
+        .map(|b| match b {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_else(|| body.to_string());
+    (source_queue, destination_url, reason, display_body)
 }
 
 fn to_dlq_message(msg: StoredMessage) -> DlqMessage {
-    let body = String::from_utf8_lossy(&msg.payload).into_owned();
-    let (source_queue, destination_url) = parse_dlq_payload(&body);
+    let raw = String::from_utf8_lossy(&msg.payload).into_owned();
+    let (source_queue, destination_url, reason, body) = parse_dlq_payload(&raw);
     DlqMessage {
         message_id: msg.id,
         key: msg.routing_key,
@@ -384,6 +571,7 @@ fn to_dlq_message(msg: StoredMessage) -> DlqMessage {
         offset: msg.offset,
         source_queue,
         destination_url,
+        reason,
     }
 }
 
@@ -523,7 +711,7 @@ async fn ensure_flow_lane(state: &AppState, owner: Uuid, key: &str) -> Result<()
     Ok(())
 }
 
-/// Upsert flow profile by key and attach to the publish request.
+/// Ensure a flow profile for inline publish (reuse if key+limits match, else create/update).
 async fn apply_inline_flow(
     state: &AppState,
     req: &mut PublishRequest,
@@ -532,11 +720,11 @@ async fn apply_inline_flow(
     let key = flow.effective_key(&req.routing_key).to_string();
     let parallelism = flow.parallelism.unwrap_or(1).max(1);
     let rate = flow.rate.unwrap_or(0);
-    let period_secs = flow.period_secs.unwrap_or(1).max(1);
+    let period_secs = flow.period_secs.unwrap_or(60).max(1);
     let profile =
         state
             .broker
-            .upsert_flow_profile_by_key(key.clone(), parallelism, rate, period_secs)?;
+            .ensure_flow_profile_by_key(key.clone(), parallelism, rate, period_secs)?;
     crate::cluster::replicate_flow_catalog(state, profile.clone()).await;
     req.flow_id = Some(profile.id);
     let mut spec = profile.to_spec();
@@ -555,8 +743,26 @@ async fn publish_job(
     >,
     Json(req): Json<PublishJobRequest>,
 ) -> Result<(StatusCode, Json<EnqueueResponse>), ApiError> {
+    let group_id = req.group_id;
     let inline_flow = req.flow.clone();
-    let mut pr = to_publish_job(req);
+    if group_id.is_some() && inline_flow.is_some() {
+        return Err(ApiError::BadRequest(
+            "inline flow is only supported for url publish; group members use their own limits"
+                .into(),
+        ));
+    }
+    if group_id.is_some() && req.flow_id.is_some() {
+        return Err(ApiError::BadRequest(
+            "flow_id is only supported for url publish; group members use their own limits".into(),
+        ));
+    }
+    let mut pr = to_publish_job(req)?;
+    if let Some(gid) = group_id {
+        #[cfg(feature = "cloud")]
+        return publish_to_group(state, ingest, plan, gid, pr).await;
+        #[cfg(not(feature = "cloud"))]
+        return publish_to_group(state, ingest, gid, pr).await;
+    }
     if let Some(flow) = inline_flow {
         apply_inline_flow(&state, &mut pr, &flow).await?;
     }
@@ -690,7 +896,7 @@ async fn create_queue(
         &state,
         Subscription {
             id: inner.id,
-            tenant_id: state.broker.config().tenant_id.clone(),
+            tenant_id: state.broker.tenant(),
             topic: inner.topic.clone(),
             url: inner.url.clone(),
             secret: req.secret,

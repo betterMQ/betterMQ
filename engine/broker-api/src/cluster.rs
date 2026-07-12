@@ -166,9 +166,9 @@ impl ClusterHandle {
 }
 
 fn shard_for_request(state: &AppState, req: &PublishRequest) -> u32 {
-    let tenant_id = &state.broker.config().tenant_id;
+    let tenant_id = state.broker.tenant();
     let partitions = state.broker.config().partitions;
-    partition_for(tenant_id, &req.topic, &req.routing_key, partitions)
+    partition_for(&tenant_id, &req.topic, &req.routing_key, partitions)
 }
 
 /// Enqueue push dispatch when this broker leads the message shard.
@@ -219,7 +219,7 @@ async fn replicate_if_needed(
     if let Err(e) = cluster
         .replication
         .replicate_append(
-            &state.broker.config().tenant_id,
+            &state.broker.tenant(),
             &resp.topic,
             partition,
             &frame,
@@ -605,6 +605,9 @@ pub fn catalog_snapshot(state: &AppState) -> CatalogSnapshot {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // Cluster catalog sync still needs secrets for followers to deliver webhooks.
+    // Exposure is gated by BETTERMQ_CLUSTER_SECRET (fail-closed). Operators must
+    // keep /internal/v1/* off the public internet.
     CatalogSnapshot {
         flows: state.broker.list_flow_profiles().unwrap_or_default(),
         queues: state.broker.list_queues().unwrap_or_default(),

@@ -317,6 +317,11 @@ impl DispatchEngine {
             .filter(|u| !u.is_empty())
             .ok_or(DispatchError::NoDestination)?;
 
+        if let Err(e) = crate::egress::validate_destination_url(url) {
+            warn!(destination = %url, error = %e, "delivery skipped: destination blocked by egress policy");
+            return Ok(());
+        }
+
         if self.host_blocker.is_blocked(url) {
             warn!(destination = %url, "delivery deferred: host blocked");
             return Ok(());
@@ -332,7 +337,11 @@ impl DispatchEngine {
             .or(msg.flow_profile_id)
             .unwrap_or(msg.id);
 
-        let tenant_id = self.broker.config().tenant_id.clone();
+        let tenant_id = if !msg.tenant_id.is_empty() {
+            msg.tenant_id.clone()
+        } else {
+            self.broker.tenant()
+        };
         let cursor =
             self.broker
                 .dispatch_offset(&tenant_id, &lane_owner.to_string(), msg.partition)?;
@@ -353,6 +362,7 @@ impl DispatchEngine {
 
         let mut attempt = 0u32;
         let started = Instant::now();
+        let mut last_failure: Option<String>;
 
         loop {
             let outbound = build_outbound(&delivery_msg);
@@ -387,6 +397,7 @@ impl DispatchEngine {
                 }
                 Ok(resp) => {
                     let status = resp.status().as_u16();
+                    last_failure = Some(format!("HTTP {status} from destination"));
                     warn!(
                         status = %resp.status(),
                         lane_owner = %lane_owner,
@@ -396,7 +407,13 @@ impl DispatchEngine {
                         "webhook non-success"
                     );
                     if self.config.non_retry_status_codes.contains(&status) {
-                        self.move_to_dlq(msg).await?;
+                        self.move_to_dlq(
+                            msg,
+                            format!(
+                                "HTTP {status} — non-retryable status (moved to DLQ without further retries)"
+                            ),
+                        )
+                        .await?;
                         self.commit_dispatch_offset(
                             &tenant_id,
                             lane_owner,
@@ -419,6 +436,7 @@ impl DispatchEngine {
                 }
                 Err(e) => {
                     self.host_blocker.record_transport_failure(url);
+                    last_failure = Some(format!("transport error: {e}"));
                     warn!(
                         error = %e,
                         lane_owner = %lane_owner,
@@ -433,7 +451,17 @@ impl DispatchEngine {
             attempt += 1;
             let max_retries = msg.max_retries;
             if attempt > max_retries {
-                self.move_to_dlq(msg).await?;
+                let attempts = max_retries.saturating_add(1);
+                let detail = last_failure
+                    .as_deref()
+                    .unwrap_or("delivery failed");
+                self.move_to_dlq(
+                    msg,
+                    format!(
+                        "{detail} — exhausted {attempts} delivery attempt(s) (max_retries={max_retries})"
+                    ),
+                )
+                .await?;
                 self.commit_dispatch_offset(&tenant_id, lane_owner, msg.partition, msg.offset)
                     .await?;
                 let _ = self
@@ -479,7 +507,11 @@ impl DispatchEngine {
         Ok(())
     }
 
-    async fn move_to_dlq(&self, msg: &StoredMessage) -> Result<(), DispatchError> {
+    async fn move_to_dlq(
+        &self,
+        msg: &StoredMessage,
+        reason: impl Into<String>,
+    ) -> Result<(), DispatchError> {
         let mut msg = msg.clone();
         self.broker
             .hydrate_message_payload(&mut msg)
@@ -488,11 +520,13 @@ impl DispatchEngine {
             (Some(gid), Some(mid)) => group_member_dlq_topic(gid, mid),
             _ => dlq_topic(&msg.topic),
         };
+        let reason = reason.into();
         let payload = serde_json::json!({
             "source_queue": msg.topic,
             "message_id": msg.id,
             "destination_url": msg.destination_url,
             "method": msg.http_method,
+            "reason": reason,
             "body": String::from_utf8_lossy(&msg.payload),
         });
         self.broker.publish_immediate(PublishRequest {

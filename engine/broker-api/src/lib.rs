@@ -14,6 +14,7 @@ mod local_auth;
 mod metering;
 mod ops;
 mod publish_path;
+mod rate_limit;
 mod routes;
 
 use axum::{extract::DefaultBodyLimit, routing::get, Json, Router};
@@ -24,13 +25,23 @@ use cluster::ClusterHandle;
 use serde::Serialize;
 use std::sync::Arc;
 
-/// Largest single-message body allowed on cloud (matches Scale plan unless overridden).
-#[cfg(feature = "cloud")]
-fn cloud_body_limit_bytes() -> usize {
-    std::env::var("BETTERMQ_MAX_MESSAGE_BYTES")
+/// HTTP body cap (cloud plan ceiling or self-host default). Override with BETTERMQ_MAX_HTTP_BODY_BYTES.
+fn http_body_limit_bytes() -> usize {
+    if let Some(n) = std::env::var("BETTERMQ_MAX_HTTP_BODY_BYTES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(52 * 1024 * 1024)
+    {
+        return n;
+    }
+    #[cfg(feature = "cloud")]
+    if let Some(n) = std::env::var("BETTERMQ_MAX_MESSAGE_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        return n;
+    }
+    // Self-host / default: 64 MiB (was unbounded — DoS risk).
+    64 * 1024 * 1024
 }
 
 pub use catalog_tombstones::CatalogTombstones;
@@ -207,20 +218,9 @@ pub fn router(state: AppState) -> Router {
         .merge(local_auth::routes())
         .merge(infra::public_infra_routes());
 
-    let app = public.merge(protected);
-    // Self-host: no HTTP body cap. Cloud: cap at operator/plan ceiling (per-tenant limits in middleware).
-    let app = if shared.uses_cloud_auth() {
-        #[cfg(feature = "cloud")]
-        {
-            app.layer(DefaultBodyLimit::max(cloud_body_limit_bytes()))
-        }
-        #[cfg(not(feature = "cloud"))]
-        {
-            app
-        }
-    } else {
-        app.layer(DefaultBodyLimit::disable())
-    };
+    let app = public
+        .merge(protected)
+        .layer(DefaultBodyLimit::max(http_body_limit_bytes()));
     app.with_state(shared)
 }
 

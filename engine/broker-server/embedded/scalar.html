@@ -5,25 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>BetterMQ API Reference</title>
   <style>
-    html, body { margin: 0; height: 100%; background: #0a0a0a; }
-    #api-reference { height: 100vh; width: 100%; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #0a0a0a;
+    }
+    #app {
+      height: 100%;
+      width: 100%;
+      overflow: auto;
+    }
+    /* Keep decorative flare out of document flow (avoids ~100vh blank gap) */
+    .section-flare {
+      position: fixed !important;
+      inset: 0 auto auto 0 !important;
+      width: 0 !important;
+      height: 0 !important;
+      overflow: hidden !important;
+      pointer-events: none !important;
+    }
   </style>
 </head>
 <body>
-  <div id="api-reference"></div>
-  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.58.0"></script>
+  <div id="app"></div>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.62.5"></script>
   <script>
-    // Single-document config (top-level `url`) — Scalar fetches the spec and
-    // manages its own loading state. Avoids the `sources`/`slug` multi-document
-    // path that triggered "Document not found in configList" + a stuck skeleton.
-    Scalar.createApiReference("#api-reference", {
-      url: new URL("/openapi.json", window.location.href).href,
-      theme: "default",
-      layout: "modern",
-      darkMode: true,
-      hideDownloadButton: false,
-      metaData: { title: "BetterMQ API" },
-    });
+    (function () {
+      const openapiUrl = new URL("/openapi.json", window.location.href).href;
+      Scalar.createApiReference("#app", {
+        url: openapiUrl,
+        theme: "none",
+        layout: "modern",
+        darkMode: true,
+        withDefaultFonts: false,
+      });
+    })();
   </script>
 </body>
 </html>
