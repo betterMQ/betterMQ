@@ -38,10 +38,10 @@ services:
       "
 
   bettermq:
+    image: ghcr.io/bettermq/bettermq:latest
     build:
       context: ..
       dockerfile: selfhost/Dockerfile
-    image: bettermq:selfhost
     ports:
       - "8080:8080"
     environment:

@@ -127,10 +127,21 @@ See [selfhost/README.md](selfhost/README.md) for options, Docker, and building f
 
 ### Docker
 
+Pull the published image (no build required):
+
+```bash
+docker pull ghcr.io/bettermq/bettermq:latest
+docker run -d --name bettermq -p 8080:8080 -v bettermq-data:/data \
+  ghcr.io/bettermq/bettermq:latest serve --data-dir /data
+open http://localhost:8080/panel/
+```
+
+Or with Compose (pulls `ghcr.io/bettermq/bettermq:latest` by default):
+
 ```bash
 git clone https://github.com/betterMQ/betterMQ.git
 cd betterMQ/selfhost
-docker compose up -d --build
+docker compose up -d
 open http://localhost:8080/panel/
 ```
 
