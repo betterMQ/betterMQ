@@ -66,6 +66,16 @@ bettermq serve --data-dir /var/lib/bettermq
 
 ---
 
+## Deploy on Railway
+
+One-click deploy with HTTPS and a persistent `/data` volume:
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/X-nl2T?referralCode=O5l32o&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+Panel: `https://<your-railway-domain>/panel/`
+
+---
+
 ## Quick start (Docker)
 
 Published image (recommended — no Rust build):

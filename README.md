@@ -125,6 +125,14 @@ open http://localhost:8080/panel/
 
 See [selfhost/README.md](selfhost/README.md) for options, Docker, and building from source.
 
+### Deploy on Railway
+
+One-click cloud deploy (HTTPS, public URL, persistent `/data` volume):
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/X-nl2T?referralCode=O5l32o&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+After deploy, open `/panel/` on your Railway domain to set a password and copy your API token.
+
 ### Docker
 
 Pull the published image (no build required):
