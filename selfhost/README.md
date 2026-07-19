@@ -68,12 +68,28 @@ bettermq serve --data-dir /var/lib/bettermq
 
 ## Quick start (Docker)
 
+Published image (recommended — no Rust build):
+
 ```bash
-git clone https://github.com/betterMQ/betterMQ.git
-cd BetterMQ/selfhost
-docker compose up -d --build
+docker pull ghcr.io/bettermq/bettermq:latest
+docker run -d --name bettermq -p 8080:8080 -v bettermq-data:/data \
+  ghcr.io/bettermq/bettermq:latest serve --data-dir /data
 open http://localhost:8080/panel/
 ```
+
+Or Compose (pulls the same image; use `--build` only if you want to compile locally):
+
+```bash
+git clone https://github.com/betterMQ/betterMQ.git
+cd betterMQ/selfhost
+docker compose up -d
+open http://localhost:8080/panel/
+```
+
+| Image | Notes |
+|-------|--------|
+| `ghcr.io/bettermq/bettermq:latest` | Latest release |
+| `ghcr.io/bettermq/bettermq:0.4.0` | Pin a version |
 
 1. Set a **panel password** and copy your API token.
 2. **Infrastructure** — storage (local or Slate + S3), optional cluster.

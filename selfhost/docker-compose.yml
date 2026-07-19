@@ -1,16 +1,21 @@
 # Self-host: single node, local WAL + RocksDB.
 #
-#   cd selfhost && docker compose up -d --build
+# Prefers the published image (no Rust toolchain needed):
+#   cd selfhost && docker compose up -d
+#
+# Build from source instead:
+#   docker compose up -d --build
+#
 #   open http://localhost:8080/panel/
 #
 # Configure storage and cluster from Panel → Infrastructure (no config file mount).
 
 services:
   bettermq:
+    image: ghcr.io/bettermq/bettermq:latest
     build:
       context: ..
       dockerfile: selfhost/Dockerfile
-    image: bettermq:selfhost
     ports:
       - "8080:8080"
     volumes:
