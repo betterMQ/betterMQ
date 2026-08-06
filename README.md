@@ -819,6 +819,12 @@ Full HTTP reference: run the broker and open **`/docs`** (OpenAPI + Scalar).
 
 ---
 
+## Contributions
+
+Pull requests are disabled. Coding agents make it too easy to send a large, low-context change that costs maintainers more time than it saves.
+
+---
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

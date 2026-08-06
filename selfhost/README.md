@@ -123,8 +123,10 @@ docker compose -f docker-compose.slate.yml up -d --build
 In **Infrastructure → Storage**, choose SlateDB and set:
 
 - Endpoint: `http://minio:9000`
-- Buckets: `bettermq`, `bettermq-payloads`
+- Buckets: `bettermq`, `bettermq-payloads` (payload bucket is **required**)
 - Access key / secret: `minio` / `minio12345`
+
+**Note:** the MinIO in `docker-compose.slate.yml` is **one node**. Good for local/dev. Not real object-store HA. For production HA use Cloudflare R2 / AWS S3 (or multi-node MinIO) plus 3 brokers.
 
 For **Cloudflare R2**, skip MinIO and use your R2 endpoint and credentials in the panel.
 
@@ -154,3 +156,7 @@ cargo build --release -p broker-server
 ```
 
 Panel still writes `./data/bettermq.json` when using `--data-dir ./data`.
+
+## Contributions
+
+Pull requests are disabled. Coding agents make it too easy to send a large, low-context change that costs maintainers more time than it saves.
