@@ -75,7 +75,10 @@ impl PartitionBackend {
         fence_generation: Option<u64>,
     ) -> Result<(StoredMessage, Vec<u8>), LogError> {
         match self {
-            Self::Local(log) => log.append(partition, header, payload),
+            Self::Local(log) => {
+                let _ = fence_generation;
+                log.append(partition, header, payload)
+            }
             #[cfg(feature = "slate")]
             Self::Slate(log) => log.append_fenced(partition, header, payload, fence_generation),
         }
