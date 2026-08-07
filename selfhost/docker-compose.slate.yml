@@ -4,6 +4,10 @@
 #   open http://localhost:8080/panel/ → Infrastructure → SlateDB
 #   MinIO (internal only): endpoint http://minio:9000  buckets bettermq + bettermq-payloads
 #
+# HONESTY: this compose runs a **single MinIO**. That is fine for laptop/dev and
+# single-node Slate. It is **not** multi-AZ object-store HA. For real HA, use a
+# managed S3/R2 (or a multi-node MinIO deployment) and 3+ brokers.
+#
 # SECURITY: MinIO ports are NOT published to the host. Override with a compose
 # override file only for local debugging. Change MINIO_ROOT_* for anything beyond
 # a throwaway laptop.

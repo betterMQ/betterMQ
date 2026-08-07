@@ -115,8 +115,9 @@ pub fn spawn_cluster_health_monitor(
             if !gained_shards.is_empty() {
                 info!(
                     shards = ?gained_shards,
-                    "failover: this node gained shard leadership; backfilling dispatch"
+                    "failover: this node gained shard leadership; backfilling dispatch (shared cursors when BETTERMQ_SHARED_META_DIR set)"
                 );
+                // Cursors/dedup live in shared meta when configured — no separate handoff file.
                 dispatch.backfill_pending();
                 sync_catalog_from_peers(&state).await;
             }

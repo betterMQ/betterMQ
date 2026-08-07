@@ -34,8 +34,19 @@ impl FsBlobStore {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(tmp, &path)?;
+        {
+            use std::fs::File;
+            use std::io::Write;
+            let mut f = File::create(&tmp)?;
+            f.write_all(data)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
         Ok(PayloadRef {
             tenant_id: tenant_id.to_string(),
             message_id,

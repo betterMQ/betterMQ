@@ -10,6 +10,7 @@ mod gateway;
 mod groups;
 mod http_fields;
 mod infra;
+mod lease;
 mod local_auth;
 mod metering;
 mod ops;
@@ -18,7 +19,7 @@ mod rate_limit;
 mod routes;
 
 use axum::{extract::DefaultBodyLimit, routing::get, Json, Router};
-use broker_dispatch::DispatchEngine;
+use broker_dispatch::{DispatchEngine, LeaseTable};
 use broker_partition::Broker;
 use broker_schedule::{CronRegistry, ScheduleQueue};
 use cluster::ClusterHandle;
@@ -57,10 +58,15 @@ pub struct AppState {
     pub schedule: ScheduleQueue,
     pub crons: CronRegistry,
     pub dispatch: DispatchEngine,
+    pub leases: LeaseTable,
     pub cluster: Option<ClusterHandle>,
     pub local_auth: Option<Arc<broker_local_auth::LocalAuthStore>>,
     pub fair_queue: Arc<broker_dispatch::TenantFairQueue>,
     pub catalog_tombstones: CatalogTombstones,
+    /// When true, public ingest routes are not mounted (fleet mode).
+    pub dispatch_fleet: bool,
+    /// When true, local delivery workers are not the primary path (broker-only).
+    pub broker_only: bool,
     #[cfg(feature = "cloud")]
     pub auth: Option<broker_control_plane::ApiKeyValidator>,
     #[cfg(feature = "cloud")]
@@ -90,38 +96,66 @@ pub struct HealthResponse {
 
 /// Builds the data-plane HTTP router.
 pub fn router(state: AppState) -> Router {
+    let dispatch_fleet = state.dispatch_fleet;
     let shared = Arc::new(state);
-    let protected = Router::new()
-        .route(
-            "/v1/enqueue/batch",
-            axum::routing::post(batch::batch_enqueue),
-        )
-        .route(
-            "/v1/gateway/enqueue",
-            axum::routing::post(gateway::gateway_enqueue),
-        )
-        .merge(bettermq::bettermq_routes())
-        .merge(groups::group_routes())
-        .route("/v1/destinations/blocked", get(ops::list_blocked_hosts))
-        .route(
-            "/v1/destinations/block",
-            axum::routing::post(ops::block_host),
-        )
-        .route(
-            "/v1/destinations/unblock",
-            axum::routing::post(ops::unblock_host),
-        )
-        .merge(infra::protected_infra_routes())
-        .route_layer(axum::middleware::from_fn_with_state(
-            shared.clone(),
-            auth::check_ingest_limits,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            shared.clone(),
-            auth::require_api_key,
-        ));
+
+    // Fleet workers do not accept public ingest; brokers still do.
+    let protected = if dispatch_fleet {
+        Router::new()
+    } else {
+        Router::new()
+            .route(
+                "/v1/enqueue/batch",
+                axum::routing::post(batch::batch_enqueue),
+            )
+            .route(
+                "/v1/gateway/enqueue",
+                axum::routing::post(gateway::gateway_enqueue),
+            )
+            .merge(bettermq::bettermq_routes())
+            .merge(groups::group_routes())
+            .route("/v1/destinations/blocked", get(ops::list_blocked_hosts))
+            .route(
+                "/v1/destinations/block",
+                axum::routing::post(ops::block_host),
+            )
+            .route(
+                "/v1/destinations/unblock",
+                axum::routing::post(ops::unblock_host),
+            )
+            .merge(infra::protected_infra_routes())
+            .route("/v1/ops/aggregate", get(ops::aggregate_ops_status))
+            .route_layer(axum::middleware::from_fn_with_state(
+                shared.clone(),
+                auth::check_ingest_limits,
+            ))
+            .route_layer(axum::middleware::from_fn_with_state(
+                shared.clone(),
+                auth::require_api_key,
+            ))
+    };
 
     let internal = Router::new()
+        .route(
+            "/internal/v1/lease/claim",
+            axum::routing::post(lease::lease_claim),
+        )
+        .route(
+            "/internal/v1/lease/heartbeat",
+            axum::routing::post(lease::lease_heartbeat),
+        )
+        .route(
+            "/internal/v1/lease/complete",
+            axum::routing::post(lease::lease_complete),
+        )
+        .route(
+            "/internal/v1/lease/fail",
+            axum::routing::post(lease::lease_fail),
+        )
+        .route(
+            "/internal/v1/lease/status",
+            axum::routing::get(lease::lease_status),
+        )
         .route(
             "/internal/v1/replicate",
             axum::routing::post(cluster::internal_replicate),
@@ -253,10 +287,13 @@ mod tests {
             schedule,
             crons,
             dispatch,
+            leases: LeaseTable::new(),
             cluster: None,
             local_auth: None,
             fair_queue: Arc::new(broker_dispatch::TenantFairQueue::new()),
             catalog_tombstones,
+            dispatch_fleet: false,
+            broker_only: false,
             #[cfg(feature = "cloud")]
             auth: None,
             #[cfg(feature = "cloud")]

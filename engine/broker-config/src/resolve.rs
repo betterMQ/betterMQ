@@ -15,6 +15,8 @@ pub struct ServeOverrides {
     pub cluster: Option<bool>,
     pub database_url: Option<String>,
     pub dispatch_fleet: Option<bool>,
+    pub broker_only: Option<bool>,
+    pub panel_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +32,8 @@ pub struct ResolvedServeSettings {
     pub dispatch_long_http_timeout_secs: u64,
     pub dispatch_retry: broker_proto::RetryDefaults,
     pub dispatch_fleet: bool,
+    pub broker_only: bool,
+    pub panel_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +149,8 @@ pub fn resolve_serve(
         dispatch_long_http_timeout_secs: base.dispatch.long_http_timeout_secs,
         dispatch_retry: base.dispatch.retry.clone(),
         dispatch_fleet: overrides.dispatch_fleet.unwrap_or(false),
+        broker_only: overrides.broker_only.unwrap_or(false),
+        panel_listen: overrides.panel_listen,
     })
 }
 

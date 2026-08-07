@@ -182,3 +182,56 @@ pub async fn block_host(
         remaining_ms: duration_ms,
     }))
 }
+
+/// Aggregate DLQ/delayed/metrics/fleet across local + peer brokers (Phase D).
+pub async fn aggregate_ops_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let local_leases = state.leases.active_count();
+    let blocked = state.dispatch.host_blocker().blocked_hosts().len();
+    let delayed = state.schedule.list().len();
+    let mut peers = Vec::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok();
+    if let Some(http) = client {
+        for (_id, addr) in crate::cluster::catalog_peer_targets(&state) {
+            let lease_url = format!("{addr}/internal/v1/lease/status");
+            let mut lease_req = http.get(&lease_url);
+            if let Ok(secret) = std::env::var("BETTERMQ_CLUSTER_SECRET") {
+                if !secret.trim().is_empty() {
+                    lease_req = lease_req.header("x-bettermq-cluster-secret", secret);
+                }
+            }
+            let peer_leases = match lease_req.send().await {
+                Ok(r) if r.status().is_success() => r
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("active_leases").and_then(|n| n.as_u64()))
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            peers.push(serde_json::json!({
+                "addr": addr,
+                "active_leases": peer_leases,
+            }));
+        }
+    }
+    Json(serde_json::json!({
+        "local": {
+            "active_leases": local_leases,
+            "blocked_hosts": blocked,
+            "delayed": delayed,
+            "broker_only": state.broker_only,
+            "dispatch_fleet": state.dispatch_fleet,
+        },
+        "peers": peers,
+        "fleet": {
+            "active_leases_total": local_leases
+                + peers
+                    .iter()
+                    .filter_map(|p| p.get("active_leases").and_then(|n| n.as_u64()))
+                    .sum::<u64>() as usize,
+        }
+    }))
+}

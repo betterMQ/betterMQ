@@ -52,9 +52,21 @@ pub struct FlowProfileRegistry {
     path: PathBuf,
 }
 
+fn meta_file_path(data_dir: &Path, name: &str) -> PathBuf {
+    if let Ok(shared) = std::env::var("BETTERMQ_SHARED_META_DIR") {
+        let shared = shared.trim();
+        if !shared.is_empty() {
+            let dir = PathBuf::from(shared);
+            let _ = std::fs::create_dir_all(&dir);
+            return dir.join(name);
+        }
+    }
+    data_dir.join(name)
+}
+
 impl FlowProfileRegistry {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, FlowProfileError> {
-        let path = data_dir.as_ref().join("flows.json");
+        let path = meta_file_path(data_dir.as_ref(), "flows.json");
         if !path.exists() {
             std::fs::write(&path, serde_json::to_vec_pretty(&FlowFile::default())?)?;
         }
@@ -67,9 +79,9 @@ impl FlowProfileRegistry {
     }
 
     fn save(&self, file: &FlowFile) -> Result<(), FlowProfileError> {
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
-        std::fs::rename(tmp, &self.path)?;
+        let _lock = broker_storage::FileLock::exclusive(&self.path)?;
+        let bytes = serde_json::to_vec_pretty(file)?;
+        broker_storage::atomic_write_file(&self.path, &bytes)?;
         Ok(())
     }
 

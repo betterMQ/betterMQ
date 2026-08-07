@@ -1,0 +1,113 @@
+# HA + fleet: 3 brokers (shared meta) + N fleet workers.
+#
+#   export BETTERMQ_CLUSTER_SECRET=dev-secret
+#   cd selfhost && docker compose -f docker-compose.ha-fleet.yml up -d --build
+#   docker compose -f docker-compose.ha-fleet.yml up -d --scale fleet=3
+#
+# Brokers: http://localhost:8081–8083 (API + panel)
+# Fleet: no public ports; claims via BETTERMQ_BROKER_URLS
+
+x-broker: &broker
+  image: ghcr.io/bettermq/bettermq:latest
+  build:
+    context: ..
+    dockerfile: selfhost/Dockerfile
+  environment:
+    BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:?set BETTERMQ_CLUSTER_SECRET}
+    BETTERMQ_SHARED_META_DIR: /cluster-shared/meta
+  volumes:
+    - cluster-meta:/cluster-shared/meta
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 30s
+
+services:
+  broker1:
+    <<: *broker
+    ports:
+      - "8081:8080"
+    volumes:
+      - cluster-meta:/cluster-shared/meta
+      - broker1-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+        "--broker-only",
+      ]
+
+  broker2:
+    <<: *broker
+    ports:
+      - "8082:8080"
+    volumes:
+      - cluster-meta:/cluster-shared/meta
+      - broker2-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+        "--broker-only",
+      ]
+
+  broker3:
+    <<: *broker
+    ports:
+      - "8083:8080"
+    volumes:
+      - cluster-meta:/cluster-shared/meta
+      - broker3-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+        "--broker-only",
+      ]
+
+  fleet:
+    image: ghcr.io/bettermq/bettermq:latest
+    build:
+      context: ..
+      dockerfile: selfhost/Dockerfile
+    environment:
+      BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:?set BETTERMQ_CLUSTER_SECRET}
+      BETTERMQ_BROKER_URLS: http://broker1:8080,http://broker2:8080,http://broker3:8080
+      BETTERMQ_FLEET_CONCURRENCY: "1"
+      # Optional long-wait tier (fleet only): 15m | 1h | 6h | 12h
+      # BETTERMQ_LONG_WAIT_TIER: 1h
+    depends_on:
+      broker1:
+        condition: service_healthy
+      broker2:
+        condition: service_healthy
+      broker3:
+        condition: service_healthy
+    restart: unless-stopped
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/tmp/fleet-data",
+        "--listen",
+        "127.0.0.1:8080",
+        "--dispatch-fleet",
+      ]
+
+volumes:
+  cluster-meta:
+  broker1-data:
+  broker2-data:
+  broker3-data:

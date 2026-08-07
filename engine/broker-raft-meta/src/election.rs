@@ -1,8 +1,8 @@
-//! Deterministic shard leader election with ring failover (CP7b).
+//! Deterministic shard leader election with ring failover (CP7b / HA M2).
 //!
 //! Preferred leader is `shard % node_count`. If that node is unhealthy, walk the ring
-//! to the next alive peer. All nodes use the same health view → same elected leader
-//! (safe for single-node failure; not split-brain safe under network partition).
+//! to the next alive peer. If **no** peer is alive, return `None` (fail closed) —
+//! do not fall back to a preferred dead node under partition ambiguity.
 
 use crate::cluster::NodeConfig;
 use uuid::Uuid;
@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub const DEFAULT_PEER_TTL_MS: i64 = 10_000;
 
 /// Walk the ring from the preferred index; return the first alive node id.
+/// Returns `None` when the ring has no alive members (fail closed).
 pub fn elect_shard_leader(
     nodes: &[NodeConfig],
     shard: u32,
@@ -27,7 +28,7 @@ pub fn elect_shard_leader(
             return Some(id);
         }
     }
-    Some(nodes[start].id)
+    None
 }
 
 #[cfg(test)]
@@ -61,9 +62,7 @@ mod tests {
         let list = nodes(&ids);
         let dead_middle = ids[1];
         let alive = |id: Uuid| id != dead_middle;
-        // shard 1 prefers index 1 (dead) → should pick index 2
         assert_eq!(elect_shard_leader(&list, 1, alive), Some(ids[2]));
-        // shard 0 prefers index 0 (alive)
         assert_eq!(elect_shard_leader(&list, 0, alive), Some(ids[0]));
     }
 
@@ -75,5 +74,13 @@ mod tests {
         let alive = |id: Uuid| id != dead;
         assert_eq!(elect_shard_leader(&list, 0, alive), Some(ids[1]));
         assert_eq!(elect_shard_leader(&list, 3, alive), Some(ids[1]));
+    }
+
+    #[test]
+    fn fail_closed_when_no_peer_alive() {
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        let list = nodes(&ids);
+        let alive = |_| false;
+        assert_eq!(elect_shard_leader(&list, 0, alive), None);
     }
 }

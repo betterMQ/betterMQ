@@ -19,26 +19,48 @@ fn auth_rate_limiter() -> &'static RateLimiter {
     LIM.get_or_init(|| RateLimiter::new(5, Duration::from_secs(60)))
 }
 
-/// Optional one-time bootstrap token for first setup (`BETTERMQ_SETUP_TOKEN`).
+/// Bootstrap token for first setup.
+///
+/// - If `BETTERMQ_SETUP_TOKEN` is set, it must match.
+/// - If unset and `BETTERMQ_ALLOW_OPEN_SETUP=1`, open setup is allowed (dev only).
+/// - Otherwise setup requires a token (fail closed for internet-facing binds).
 fn setup_token_ok(headers: &HeaderMap, body_token: Option<&str>) -> Result<(), ApiError> {
-    let Some(expected) = std::env::var("BETTERMQ_SETUP_TOKEN")
+    let open_setup = matches!(
+        std::env::var("BETTERMQ_ALLOW_OPEN_SETUP")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    );
+    let expected = std::env::var("BETTERMQ_SETUP_TOKEN")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    else {
-        return Ok(());
-    };
-    let presented = headers
-        .get("x-bettermq-setup-token")
-        .and_then(|v| v.to_str().ok())
-        .or(body_token)
-        .unwrap_or("");
-    if presented != expected {
-        return Err(ApiError::BadRequest(
-            "invalid or missing setup token (set header x-bettermq-setup-token)".into(),
-        ));
+        .filter(|s| !s.is_empty());
+
+    match expected {
+        None if open_setup => Ok(()),
+        None => Err(ApiError::Unauthorized(
+            "setup locked: set BETTERMQ_SETUP_TOKEN (or BETTERMQ_ALLOW_OPEN_SETUP=1 for local dev)"
+                .into(),
+        )),
+        Some(expected) => {
+            let presented = headers
+                .get("x-bettermq-setup-token")
+                .and_then(|v| v.to_str().ok())
+                .or(body_token)
+                .unwrap_or("");
+            // Constant-time compare
+            use subtle::ConstantTimeEq;
+            let a = presented.as_bytes();
+            let b = expected.as_bytes();
+            if a.len() != b.len() || !bool::from(a.ct_eq(b)) {
+                return Err(ApiError::Unauthorized(
+                    "invalid or missing setup token (header x-bettermq-setup-token)".into(),
+                ));
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 pub fn routes() -> Router<Arc<AppState>> {

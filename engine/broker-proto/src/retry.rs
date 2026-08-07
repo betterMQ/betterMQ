@@ -66,7 +66,7 @@ impl RetryBackoff {
 }
 
 fn default_max_retries() -> u32 {
-    0
+    3
 }
 
 /// Broker-wide defaults (bettermq.json `dispatch` section).

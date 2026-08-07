@@ -2,6 +2,7 @@
 
 mod cluster;
 mod election;
+mod flock;
 
 pub use cluster::{ClusterConfig, ClusterError, ClusterRuntime, NodeConfig, SchedulerLease};
 pub use election::{elect_shard_leader, DEFAULT_PEER_TTL_MS};

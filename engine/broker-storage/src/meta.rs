@@ -1,6 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Atomic durable write: temp → fsync → rename → parent-dir fsync.
+pub fn atomic_write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LogMeta {
@@ -28,9 +47,8 @@ impl LogMeta {
 
     pub fn save(&self, partition_dir: &Path) -> std::io::Result<()> {
         let path = Self::path(partition_dir);
-        let tmp = partition_dir.join("meta.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self).unwrap())?;
-        std::fs::rename(tmp, path)?;
-        Ok(())
+        let bytes = serde_json::to_vec(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        atomic_write_file(&path, &bytes)
     }
 }

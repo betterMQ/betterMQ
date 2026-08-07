@@ -34,9 +34,21 @@ pub struct CatalogTombstones {
     path: PathBuf,
 }
 
+fn meta_file_path(data_dir: &Path, name: &str) -> PathBuf {
+    if let Ok(shared) = std::env::var("BETTERMQ_SHARED_META_DIR") {
+        let shared = shared.trim();
+        if !shared.is_empty() {
+            let dir = PathBuf::from(shared);
+            let _ = std::fs::create_dir_all(&dir);
+            return dir.join(name);
+        }
+    }
+    data_dir.join(name)
+}
+
 impl CatalogTombstones {
     pub fn open(data_dir: impl AsRef<Path>) -> std::io::Result<Self> {
-        let path = data_dir.as_ref().join("catalog-tombstones.json");
+        let path = meta_file_path(data_dir.as_ref(), "catalog-tombstones.json");
         if !path.exists() {
             let file = TombstoneFile::default();
             std::fs::write(&path, serde_json::to_vec_pretty(&file)?)?;
@@ -50,10 +62,9 @@ impl CatalogTombstones {
     }
 
     fn save(&self, file: &TombstoneFile) -> std::io::Result<()> {
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
-        std::fs::rename(tmp, &self.path)?;
-        Ok(())
+        let _lock = broker_storage::FileLock::exclusive(&self.path)?;
+        let bytes = serde_json::to_vec_pretty(file)?;
+        broker_storage::atomic_write_file(&self.path, &bytes)
     }
 
     pub fn record(&self, id: Uuid, kind: CatalogKind) -> std::io::Result<()> {

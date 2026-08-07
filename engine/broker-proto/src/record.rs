@@ -24,7 +24,7 @@ fn default_priority() -> u8 {
 }
 
 fn default_max_retries() -> u32 {
-    0
+    3
 }
 
 /// Metadata stored in the log before payload bytes.

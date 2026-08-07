@@ -337,20 +337,27 @@ impl FlowController {
     async fn get_or_create_lane(&self, key: FlowKey, limits: ResolvedFlow) -> Arc<FlowLane> {
         let mut map = self.lanes.lock().await;
         if let Some(existing) = map.get(&key) {
-            let el = existing.limits.lock().await;
-            if el.parallelism == limits.parallelism
-                && el.rate == limits.rate
-                && el.period_secs == limits.period_secs
+            // Update limits in place — never replace the lane (that orphans the waitlist
+            // and leaks a drainer task parked on the old Notify).
             {
-                return existing.clone();
+                let mut el = existing.limits.lock().await;
+                el.parallelism = limits.parallelism;
+                el.rate = limits.rate;
+                el.period_secs = limits.period_secs;
             }
+            {
+                let mut rate = existing.rate.lock().await;
+                rate.max = limits.rate;
+                rate.period_secs = limits.period_secs.max(1);
+            }
+            existing.notify.notify_one();
+            return existing.clone();
         }
         let lane = Arc::new(FlowLane {
             limits: Mutex::new(limits.clone()),
             waitlist: Mutex::new(BinaryHeap::new()),
             active: AtomicU32::new(0),
             rate: Mutex::new(RateWindow::new(limits.rate, limits.period_secs)),
-            // limits set above
             paused: Mutex::new(false),
             pinned: Mutex::new(PinnedLimits {
                 parallelism: None,

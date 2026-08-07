@@ -220,6 +220,21 @@ impl BetterMqConfig {
                         self.node.name
                     )));
                 }
+                // HA M2: multi-node local WAL requires shared meta for fencing, leases, cursors.
+                if cluster.nodes.len() >= 2 {
+                    let is_local = matches!(self.storage, StorageConfig::Local);
+                    let has_shared = cluster
+                        .shared_meta_dir
+                        .as_ref()
+                        .map(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(false);
+                    if is_local && !has_shared {
+                        return Err(ConfigError::Invalid(
+                            "cluster with 2+ nodes and local storage requires cluster.sharedMetaDir (fencing, scheduler lease, shared cursors)"
+                                .into(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -247,6 +262,20 @@ fn validate_s3(s3: &S3Config) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid(
             "storage.s3.access_key and secret_key are required".into(),
         ));
+    }
+    match &s3.payload_bucket {
+        None => {
+            return Err(ConfigError::Invalid(
+                "storage.s3.payloadBucket is required for Slate (large payloads must not use local disk)"
+                    .into(),
+            ));
+        }
+        Some(pb) if pb.trim().is_empty() => {
+            return Err(ConfigError::Invalid(
+                "storage.s3.payloadBucket must not be empty".into(),
+            ));
+        }
+        Some(_) => {}
     }
     Ok(())
 }
@@ -400,6 +429,24 @@ mod tests {
         });
         cfg.validate().expect("seed with one node is valid");
         assert!(!cfg.cluster_enabled());
+    }
+
+    #[test]
+    fn rejects_multi_node_local_without_shared_meta() {
+        let mut cfg = BetterMqConfig::template_cluster_local();
+        if let Some(c) = cfg.cluster.as_mut() {
+            c.shared_meta_dir = None;
+        }
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_slate_without_payload_bucket() {
+        let mut cfg = BetterMqConfig::template_single_slate();
+        if let StorageConfig::Slate { s3 } = &mut cfg.storage {
+            s3.payload_bucket = None;
+        }
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

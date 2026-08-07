@@ -64,6 +64,7 @@ pub async fn batch_enqueue(
 
     let mut ids = Vec::new();
     for req in body.messages {
+        crate::routes::validate_publish_destinations_pub(&req)?;
         let meter = crate::metering::ingest_meter(ingest.as_ref().map(|e| e.0), req.payload.len());
         let resp = publish_with_cluster(&state, req, meter).await?;
         if let Some(message_id) = resp.message_id {

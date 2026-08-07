@@ -6,17 +6,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, warn};
 
-async fn join_all<I>(futs: Vec<I>) -> Vec<bool>
-where
-    I: std::future::Future<Output = bool>,
-{
-    let mut out = Vec::with_capacity(futs.len());
-    for f in futs {
-        out.push(f.await);
-    }
-    out
-}
-
 #[derive(Debug, Error)]
 pub enum ReplicateError {
     #[error("http error: {0}")]
@@ -32,6 +21,9 @@ pub struct ReplicateAppendRequest {
     pub tenant_id: String,
     pub topic: String,
     pub partition: u32,
+    /// Leader-assigned log offset for this frame (quorum-atomic agreement).
+    #[serde(default)]
+    pub offset: u64,
     /// Base64-encoded partition log frame (magic + header + payload + crc).
     pub frame_b64: String,
     pub leader_generation: u64,
@@ -58,12 +50,13 @@ impl ReplicationClient {
         Self::new(cluster)
     }
 
-    /// Leader: replicate frame to all peers; require quorum acks (including self).
+    /// Leader: parallel fan-out frame to peers; require quorum acks (including self).
     pub async fn replicate_append(
         &self,
         tenant_id: &str,
         topic: &str,
         partition: u32,
+        offset: u64,
         frame: &[u8],
         leader_generation: u64,
     ) -> Result<(), ReplicateError> {
@@ -75,6 +68,7 @@ impl ReplicationClient {
             tenant_id: tenant_id.to_string(),
             topic: topic.to_string(),
             partition,
+            offset,
             frame_b64: B64.encode(frame),
             leader_generation,
         };
@@ -83,12 +77,12 @@ impl ReplicationClient {
         let mut acked = 1usize; // leader local write assumed done by caller
 
         let peers = self.cluster.peer_addrs();
-        let mut futs = Vec::new();
+        let mut handles = Vec::with_capacity(peers.len());
         for peer in peers {
             let url = format!("{peer}/internal/v1/replicate");
             let http = self.http.clone();
             let body = req.clone();
-            futs.push(async move {
+            handles.push(tokio::spawn(async move {
                 let req_builder = http.post(&url).json(&body);
                 let req_builder = if let Ok(secret) = std::env::var("BETTERMQ_CLUSTER_SECRET") {
                     if secret.trim().is_empty() {
@@ -110,16 +104,16 @@ impl ReplicationClient {
                         false
                     }
                 }
-            });
+            }));
         }
 
-        for ok in join_all(futs).await {
-            if ok {
+        for handle in handles {
+            if let Ok(true) = handle.await {
                 acked += 1;
             }
         }
 
-        debug!(acked, quorum, topic, partition, "replicate quorum");
+        debug!(acked, quorum, topic, partition, offset, "replicate quorum");
         if acked >= quorum {
             Ok(())
         } else {

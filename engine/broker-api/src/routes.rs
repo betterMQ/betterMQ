@@ -98,6 +98,11 @@ fn validate_destination_url_str(url: &str) -> Result<(), ApiError> {
     broker_dispatch::validate_destination_url(url).map_err(|e| ApiError::BadRequest(e.to_string()))
 }
 
+/// Public for catalog apply / other ingest paths.
+pub fn validate_destination_url_str_pub(url: &str) -> Result<(), ApiError> {
+    validate_destination_url_str(url)
+}
+
 fn validate_publish_destinations(req: &PublishRequest) -> Result<(), ApiError> {
     if let Some(url) = req.url.as_deref().filter(|u| !u.trim().is_empty()) {
         validate_destination_url_str(url)?;
@@ -106,6 +111,11 @@ fn validate_publish_destinations(req: &PublishRequest) -> Result<(), ApiError> {
         validate_destination_url_str(&dest.url)?;
     }
     Ok(())
+}
+
+/// Public for batch / gateway ingest paths.
+pub fn validate_publish_destinations_pub(req: &PublishRequest) -> Result<(), ApiError> {
+    validate_publish_destinations(req)
 }
 
 /// Frozen destination for delayed enqueue or publish (queue, inline URL, or snapshot).
@@ -166,6 +176,7 @@ pub(crate) fn resolve_destination(
 pub enum ApiError {
     Broker(BrokerError),
     BadRequest(String),
+    Unauthorized(String),
     ReplicationFailed(String),
 }
 
@@ -188,6 +199,11 @@ impl IntoResponse for ApiError {
         match self {
             ApiError::BadRequest(msg) => (
                 StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response(),
+            ApiError::Unauthorized(msg) => (
+                StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": msg })),
             )
                 .into_response(),

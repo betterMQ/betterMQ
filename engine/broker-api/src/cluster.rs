@@ -199,6 +199,7 @@ pub fn enqueue_dispatch_after_publish(state: &AppState, resp: &PublishResponse) 
 async fn replicate_if_needed(
     state: &Arc<AppState>,
     resp: &mut PublishResponse,
+    idempotency_key: Option<&str>,
 ) -> Result<(), ApiError> {
     if state.broker.config().storage == StorageMode::Slate {
         return Ok(());
@@ -212,6 +213,9 @@ async fn replicate_if_needed(
     let Some(partition) = resp.partition else {
         return Ok(());
     };
+    let Some(offset) = resp.offset else {
+        return Ok(());
+    };
     let Some(frame) = resp.replication_frame.take() else {
         return Ok(());
     };
@@ -222,12 +226,18 @@ async fn replicate_if_needed(
             &state.broker.tenant(),
             &resp.topic,
             partition,
+            offset,
             &frame,
             leader_generation,
         )
         .await
     {
         warn!(error = %e, "replication quorum failed");
+        // Compensate: tombstone local orphan + clear dedup so client retry is clean.
+        let _ = state.broker.purge_message(&resp.topic, partition, offset);
+        if let Some(key) = idempotency_key {
+            let _ = state.broker.clear_publish_dedup(key);
+        }
         return Err(ApiError::ReplicationFailed(e.to_string()));
     }
     Ok(())
@@ -241,8 +251,9 @@ async fn publish_on_leader(
     let body_bytes = meter
         .map(|m| m.body_bytes)
         .unwrap_or_else(|| req.payload.len() as u64);
+    let idempotency_key = req.idempotency_key.clone();
     let mut resp = state.broker.publish(req)?;
-    replicate_if_needed(state, &mut resp).await?;
+    replicate_if_needed(state, &mut resp, idempotency_key.as_deref()).await?;
     if let Some(m) = meter {
         if !resp.duplicate {
             crate::metering::record_ingest(state, m.tenant_id, body_bytes).await;
@@ -644,6 +655,7 @@ pub fn apply_catalog_snapshot(state: &AppState, snap: &CatalogSnapshot) -> Resul
         if !catalog_item_alive(sub.id, sub.updated_at_ms, &tombstones) {
             continue;
         }
+        crate::routes::validate_destination_url_str_pub(&sub.url)?;
         state
             .broker
             .upsert_subscription_catalog(sub.clone())
@@ -662,6 +674,7 @@ pub fn apply_catalog_snapshot(state: &AppState, snap: &CatalogSnapshot) -> Resul
         if !catalog_item_alive(member.id, member.updated_at_ms, &tombstones) {
             continue;
         }
+        crate::routes::validate_destination_url_str_pub(&member.url)?;
         state
             .broker
             .upsert_group_member_catalog(member.clone())
@@ -670,6 +683,9 @@ pub fn apply_catalog_snapshot(state: &AppState, snap: &CatalogSnapshot) -> Resul
     for job in &snap.crons {
         if !catalog_item_alive(job.id, job.updated_at_ms, &tombstones) {
             continue;
+        }
+        if let Some(dest) = job.request.destination.as_ref() {
+            crate::routes::validate_destination_url_str_pub(&dest.url)?;
         }
         state
             .crons
@@ -1356,13 +1372,19 @@ pub async fn internal_replicate(
                 body.leader_generation, expected
             )));
         }
+        // Adopt higher generation from a fenced leader (shared meta catch-up).
+        if body.leader_generation > expected {
+            cluster
+                .runtime
+                .observe_shard_generation(body.partition, body.leader_generation);
+        }
     }
     let frame = B64
         .decode(&body.frame_b64)
         .map_err(|e| ApiError::BadRequest(format!("invalid frame_b64: {e}")))?;
     state
         .broker
-        .append_replicated_frame(&body.topic, body.partition, &frame)?;
+        .append_replicated_frame(&body.topic, body.partition, &frame, Some(body.offset))?;
     Ok(StatusCode::OK)
 }
 

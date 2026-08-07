@@ -33,3 +33,30 @@ jobs:
 
       - name: build broker-server
         run: cargo build -p broker-server --release
+
+  selfhost-compose-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate compose files
+        working-directory: selfhost
+        run: |
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.slate.yml config >/dev/null
+          BETTERMQ_CLUSTER_SECRET=ci-secret docker compose -f docker-compose.ha.yml config >/dev/null
+          BETTERMQ_CLUSTER_SECRET=ci-secret docker compose -f docker-compose.ha-slate.yml config >/dev/null
+          BETTERMQ_CLUSTER_SECRET=ci-secret docker compose -f docker-compose.ha-fleet.yml config >/dev/null
+          BETTERMQ_CLUSTER_SECRET=ci-secret docker compose -f docker-compose.ha-slate-fleet.yml config >/dev/null
+
+  release-gates:
+    runs-on: ubuntu-latest
+    needs: [rust, selfhost-compose-validate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: SSRF + lease unit gates
+        run: |
+          cargo test -p broker-dispatch egress -- --nocapture
+          cargo test -p broker-dispatch lease -- --nocapture
+          cargo test -p broker-dispatch host_blocker -- --nocapture

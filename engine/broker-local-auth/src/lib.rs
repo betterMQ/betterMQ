@@ -195,18 +195,28 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 fn write_atomic(path: &Path, stored: &Stored) -> Result<(), LocalAuthError> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(stored)?;
-    fs::write(&tmp, json)?;
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
-    fs::rename(tmp, path)?;
+    fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

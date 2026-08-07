@@ -126,9 +126,17 @@ pub struct ServeArgs {
     #[arg(long, env = "BETTERMQ_CLUSTER")]
     pub cluster: Option<bool>,
 
-    /// CP10: run as stateless dispatch-only fleet (no enqueue routes).
+    /// Broker-only: accept ingest + lease API; do not run local delivery workers.
+    #[arg(long, env = "BETTERMQ_BROKER_ONLY", default_value_t = false)]
+    pub broker_only: bool,
+
+    /// Dispatch fleet: claim jobs from brokers via BETTERMQ_BROKER_URLS (no ingest).
     #[arg(long, env = "BETTERMQ_DISPATCH_FLEET", default_value_t = false)]
     pub dispatch_fleet: bool,
+
+    /// Optional second listen address for the embedded panel only (e.g. 127.0.0.1:8090).
+    #[arg(long, env = "BETTERMQ_PANEL_LISTEN")]
+    pub panel_listen: Option<SocketAddr>,
 }
 
 /// Shared `bettermq serve` flags (cloud build).
@@ -159,9 +167,17 @@ pub struct ServeArgs {
     #[arg(long, env = "DATABASE_URL")]
     pub database_url: Option<String>,
 
-    /// CP10: run as stateless dispatch-only fleet (no enqueue routes).
+    /// Broker-only: accept ingest + lease API; do not run local delivery workers.
+    #[arg(long, env = "BETTERMQ_BROKER_ONLY", default_value_t = false)]
+    pub broker_only: bool,
+
+    /// Dispatch fleet: claim jobs from brokers via BETTERMQ_BROKER_URLS (no ingest).
     #[arg(long, env = "BETTERMQ_DISPATCH_FLEET", default_value_t = false)]
     pub dispatch_fleet: bool,
+
+    /// Optional second listen address for the embedded panel only.
+    #[arg(long, env = "BETTERMQ_PANEL_LISTEN")]
+    pub panel_listen: Option<SocketAddr>,
 }
 
 impl Cli {

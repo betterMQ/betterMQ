@@ -14,7 +14,7 @@ use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -205,7 +205,10 @@ impl ScheduleQueue {
         })
     }
 
-    pub fn pop_due(&self, now_ms: i64) -> Vec<ScheduledPublishRequest> {
+    /// Pop due jobs from the in-memory heap **without** persisting.
+    /// Persist only via [`Self::complete`] after a successful fire so a crash
+    /// before publish still reloads the job from disk (at-least-once).
+    pub fn pop_due(&self, now_ms: i64) -> Vec<ScheduledPublish> {
         let mut heap = self.heap.lock();
         let mut popped = Vec::new();
         while let Some(top) = heap.peek() {
@@ -213,28 +216,30 @@ impl ScheduleQueue {
                 break;
             }
             let item = heap.pop().expect("peeked");
-            popped.push(item);
+            popped.push(ScheduledPublish {
+                id: item.id,
+                deliver_at_ms: item.deliver_at_ms,
+                request: item.request,
+            });
         }
-        drop(heap);
+        popped
+    }
 
-        if popped.is_empty() {
-            return Vec::new();
-        }
+    /// Remove a fired job from durable storage after successful publish.
+    pub fn complete(&self, id: Uuid) -> Result<(), ScheduleError> {
+        // Already removed from the in-memory heap in pop_due; just persist remainder.
+        let _ = id;
+        self.persist()
+    }
 
-        if let Err(e) = self.persist() {
-            warn!(
-                error = %e,
-                count = popped.len(),
-                "failed to persist schedule after pop_due; re-queued in memory"
-            );
-            let mut heap = self.heap.lock();
-            for item in popped {
-                heap.push(item);
-            }
-            return Vec::new();
-        }
-
-        popped.into_iter().map(|item| item.request).collect()
+    /// Put a failed fire back onto the heap and persist (retry later).
+    pub fn requeue(&self, job: ScheduledPublish) -> Result<(), ScheduleError> {
+        self.heap.lock().push(HeapItem {
+            deliver_at_ms: job.deliver_at_ms,
+            id: job.id,
+            request: job.request,
+        });
+        self.persist()
     }
 
     fn persist(&self) -> Result<(), ScheduleError> {

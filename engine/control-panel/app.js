@@ -555,6 +555,21 @@
       .fail(function () {
         renderClusterStatus(null);
       });
+    apiGetJSON(base + "/v1/ops/aggregate")
+      .done(function (agg) {
+        const fleet = (agg && agg.fleet) || {};
+        const local = (agg && agg.local) || {};
+        const n = fleet.active_leases_total != null ? fleet.active_leases_total : local.active_leases;
+        if ($("#fleetStatusLine").length) {
+          $("#fleetStatusLine").text(
+            "Fleet leases: " +
+              (n != null ? n : "—") +
+              (local.broker_only ? " · broker-only" : "") +
+              (local.dispatch_fleet ? " · fleet worker" : "")
+          );
+        }
+      })
+      .fail(function () {});
   }
 
   function apiPostJSON(url, data) {

@@ -1,0 +1,134 @@
+# HA Slate + fleet: 3 brokers (S3/MinIO) + N fleet workers.
+#
+#   export BETTERMQ_CLUSTER_SECRET=dev-secret
+#   cd selfhost && docker compose -f docker-compose.ha-slate-fleet.yml up -d --build
+#   docker compose -f docker-compose.ha-slate-fleet.yml up -d --scale fleet=3
+#
+# MinIO here is single-node (dev only — not object-store HA).
+
+x-broker: &broker
+  image: ghcr.io/bettermq/bettermq:latest
+  build:
+    context: ..
+    dockerfile: selfhost/Dockerfile
+  environment:
+    BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:?set BETTERMQ_CLUSTER_SECRET}
+    BETTERMQ_STORAGE: slate
+    S3_ENDPOINT: http://minio:9000
+    S3_BUCKET: bettermq
+    S3_PAYLOAD_BUCKET: bettermq-payloads
+    S3_ACCESS_KEY: minio
+    S3_SECRET_KEY: minio12345
+    S3_REGION: us-east-1
+  depends_on:
+    - minio
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 45s
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3;
+      mc alias set local http://minio:9000 minio minio12345;
+      mc mb -p local/bettermq || true;
+      mc mb -p local/bettermq-payloads || true;
+      exit 0;
+      "
+
+  broker1:
+    <<: *broker
+    ports:
+      - "8081:8080"
+    volumes:
+      - broker1-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+        "--broker-only",
+      ]
+
+  broker2:
+    <<: *broker
+    ports:
+      - "8082:8080"
+    volumes:
+      - broker2-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+        "--broker-only",
+      ]
+
+  broker3:
+    <<: *broker
+    ports:
+      - "8083:8080"
+    volumes:
+      - broker3-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+        "--broker-only",
+      ]
+
+  fleet:
+    image: ghcr.io/bettermq/bettermq:latest
+    build:
+      context: ..
+      dockerfile: selfhost/Dockerfile
+    environment:
+      BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:?set BETTERMQ_CLUSTER_SECRET}
+      BETTERMQ_BROKER_URLS: http://broker1:8080,http://broker2:8080,http://broker3:8080
+      BETTERMQ_FLEET_CONCURRENCY: "1"
+    depends_on:
+      broker1:
+        condition: service_healthy
+    restart: unless-stopped
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/tmp/fleet-data",
+        "--listen",
+        "127.0.0.1:8080",
+        "--dispatch-fleet",
+      ]
+
+volumes:
+  minio-data:
+  broker1-data:
+  broker2-data:
+  broker3-data:

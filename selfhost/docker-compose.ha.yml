@@ -1,0 +1,83 @@
+# Self-host HA: 3 brokers + shared meta volume (local WAL).
+#
+#   cd selfhost && docker compose -f docker-compose.ha.yml up -d --build
+#
+# Panel: http://localhost:8081/panel/  (broker1)
+# Requires BETTERMQ_CLUSTER_SECRET (set below or in .env).
+#
+# After first boot: configure cluster from Panel → Infrastructure on broker1,
+# then join broker2/broker3 (or pre-seed bettermq.json). Shared meta is at
+# /cluster-shared/meta on every node.
+
+x-broker: &broker
+  image: ghcr.io/bettermq/bettermq:latest
+  build:
+    context: ..
+    dockerfile: selfhost/Dockerfile
+  environment:
+    BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:?set BETTERMQ_CLUSTER_SECRET}
+    BETTERMQ_SHARED_META_DIR: /cluster-shared/meta
+  volumes:
+    - cluster-meta:/cluster-shared/meta
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 30s
+
+services:
+  broker1:
+    <<: *broker
+    ports:
+      - "8081:8080"
+    volumes:
+      - cluster-meta:/cluster-shared/meta
+      - broker1-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+      ]
+
+  broker2:
+    <<: *broker
+    ports:
+      - "8082:8080"
+    volumes:
+      - cluster-meta:/cluster-shared/meta
+      - broker2-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+      ]
+
+  broker3:
+    <<: *broker
+    ports:
+      - "8083:8080"
+    volumes:
+      - cluster-meta:/cluster-shared/meta
+      - broker3-data:/data
+    command:
+      [
+        "serve",
+        "--data-dir",
+        "/data",
+        "--listen",
+        "0.0.0.0:8080",
+      ]
+
+volumes:
+  cluster-meta:
+  broker1-data:
+  broker2-data:
+  broker3-data:

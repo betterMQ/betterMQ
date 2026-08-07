@@ -22,6 +22,7 @@ impl MessageStore for SlateMessageStore {
         &mut self,
         _partition: u32,
         _frame: &[u8],
+        _expected_offset: Option<u64>,
     ) -> Result<StoredMessage, StoreError> {
         Err(StoreError::NotImplemented(
             "SlateDB append_raw_frame".into(),

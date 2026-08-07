@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -235,45 +235,45 @@ impl CronRegistry {
         self.persist()
     }
 
-    /// Jobs that should fire now (not paused, `next_run_at_ms <= now`).
+    /// Jobs due now — advances next_run only in memory. Call [`Self::commit_fire`]
+    /// after successful publish, or [`Self::revert_fire`] on failure.
     pub fn pop_due(&self, now_ms: i64) -> Vec<CronJob> {
         let mut file = self.inner.lock();
-        let mut reverts: Vec<(Uuid, Option<i64>, i64)> = Vec::new();
         let mut due = Vec::new();
         for job in &mut file.jobs {
             if job.paused || job.next_run_at_ms > now_ms {
                 continue;
             }
-            reverts.push((job.id, job.last_run_at_ms, job.next_run_at_ms));
-            due.push(job.clone());
+            let previous = job.clone();
             job.last_run_at_ms = Some(now_ms);
             if let Ok(next) = next_run_for_job(&job.cron, job.every_seconds, now_ms) {
                 job.next_run_at_ms = next;
             }
+            // Return the pre-advance snapshot stamped with fire time for idempotency.
+            let mut fired = previous;
+            fired.last_run_at_ms = Some(now_ms);
+            due.push(fired);
+        }
+        // Do not persist here — commit_fire / revert_fire owns durability.
+        due
+    }
+
+    /// Persist advanced next_run after a successful cron publish.
+    pub fn commit_fire(&self, id: Uuid) -> Result<(), CronError> {
+        // State already advanced in pop_due; persist current registry.
+        let _ = id;
+        self.persist()
+    }
+
+    /// Revert next_run after a failed publish so the tick retries.
+    pub fn revert_fire(&self, job: &CronJob) -> Result<(), CronError> {
+        let mut file = self.inner.lock();
+        if let Some(slot) = file.jobs.iter_mut().find(|j| j.id == job.id) {
+            slot.next_run_at_ms = job.next_run_at_ms;
+            slot.last_run_at_ms = job.last_run_at_ms;
         }
         drop(file);
-
-        if due.is_empty() {
-            return Vec::new();
-        }
-
-        if let Err(e) = self.persist() {
-            warn!(
-                error = %e,
-                count = due.len(),
-                "failed to persist cron registry after pop_due; reverted in memory"
-            );
-            let mut file = self.inner.lock();
-            for (id, last_run_at_ms, next_run_at_ms) in reverts {
-                if let Some(job) = file.jobs.iter_mut().find(|j| j.id == id) {
-                    job.last_run_at_ms = last_run_at_ms;
-                    job.next_run_at_ms = next_run_at_ms;
-                }
-            }
-            return Vec::new();
-        }
-
-        due
+        self.persist()
     }
 
     fn set_paused(&self, id: Uuid, paused: bool) -> Result<CronJob, CronError> {

@@ -193,6 +193,8 @@ fn serve_overrides(args: &ServeArgs) -> ServeOverrides {
         } else {
             None
         },
+        broker_only: if args.broker_only { Some(true) } else { None },
+        panel_listen: args.panel_listen,
     }
 }
 
@@ -258,7 +260,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             if local.is_configured() {
                 info!("local API token auth enabled");
             } else {
-                info!("local auth not configured — complete setup in /panel/");
+                ensure_setup_token(&settings.data_dir);
             }
             (None, Some(Arc::new(local)), None)
         }
@@ -275,7 +277,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             if local.is_configured() {
                 info!("local API token auth enabled");
             } else {
-                info!("local auth not configured — complete setup in /panel/");
+                ensure_setup_token(&settings.data_dir);
             }
             Some(Arc::new(local))
         }
@@ -285,6 +287,14 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         let config =
             ClusterRuntime::load_config(&settings.data_dir).context("load cluster-config.json")?;
         let runtime = ClusterRuntime::open(&settings.data_dir, config.clone())?;
+        if config.node_count() >= 2
+            && matches!(settings.storage, broker_config::StorageMode::Local)
+            && !runtime.uses_shared_meta()
+        {
+            anyhow::bail!(
+                "HA cluster (2+ nodes, local storage) requires BETTERMQ_SHARED_META_DIR / cluster.sharedMetaDir for fencing and scheduler lease"
+            );
+        }
         Some(Cluster::new(runtime))
     } else {
         None
@@ -300,7 +310,13 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let broker = Broker::open(broker_cfg).context("open broker storage")?;
     if let Some(ref c) = cluster {
         let rt = c.runtime.clone();
-        broker.set_shard_leader_check(Arc::new(move |p| rt.is_leader_for_shard(p)));
+        broker.set_shard_leader_check(Arc::new(move |p| {
+            if rt.is_leader_for_shard(p) {
+                Some(rt.shard_generation(p))
+            } else {
+                None
+            }
+        }));
     }
     let schedule = ScheduleQueue::open(&settings.data_dir).context("open schedule queue")?;
     let crons = CronRegistry::open(&settings.data_dir).context("open cron registry")?;
@@ -314,22 +330,34 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         long_payload_threshold_bytes: 256 * 1024,
         ..DispatchConfig::default()
     };
-    let mut dispatch = DispatchEngine::new(broker.clone(), dispatch_cfg);
+    let leases = broker_dispatch::LeaseTable::new();
+    let broker_only = settings.broker_only || settings.dispatch_fleet;
+    let mut dispatch = if broker_only {
+        DispatchEngine::new_broker_only(broker.clone(), dispatch_cfg)
+    } else {
+        DispatchEngine::new(broker.clone(), dispatch_cfg)
+    };
+    dispatch = dispatch.with_leases(leases.clone());
     if let Some(ref c) = cluster {
         let rt = c.runtime.clone();
         dispatch = dispatch.with_shard_leader_check(Arc::new(move |p| rt.is_leader_for_shard(p)));
     }
-    dispatch.backfill_pending();
+    if !broker_only {
+        dispatch.backfill_pending();
+    }
 
     let app_state = Arc::new(AppState {
         broker,
         schedule,
         crons,
         dispatch,
+        leases,
         cluster,
         local_auth,
         fair_queue: Arc::new(broker_dispatch::TenantFairQueue::new()),
         catalog_tombstones,
+        dispatch_fleet: settings.dispatch_fleet,
+        broker_only: settings.broker_only,
         #[cfg(feature = "cloud")]
         auth,
         #[cfg(feature = "cloud")]
@@ -347,24 +375,51 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         );
     }
 
-    spawn_schedule_worker(app_state.clone());
+    if !settings.dispatch_fleet {
+        spawn_schedule_worker(app_state.clone());
+    }
+    if !broker_only {
+        spawn_dispatch_backfill_loop(app_state.clone());
+    }
+    if settings.dispatch_fleet {
+        spawn_fleet_workers(app_state.clone());
+    }
 
     let cors = build_cors_layer();
 
     let app = router((*app_state).clone());
     if settings.dispatch_fleet {
-        info!("dispatch fleet mode: enqueue routes disabled (CP10)");
+        info!("dispatch fleet mode: claiming from BETTERMQ_BROKER_URLS");
+    }
+    if settings.broker_only {
+        info!("broker-only mode: lease API enabled, local delivery workers off");
     }
     let app = app
         .merge(docs::router())
         .route("/panel", get(|| async { Redirect::permanent("/panel/") }))
         .nest("/panel/", panel::resolve_router())
-        .layer(cors)
+        .layer(cors.clone())
         .layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(settings.listen)
         .await
         .with_context(|| format!("bind {}", settings.listen))?;
+
+    if let Some(panel_addr) = settings.panel_listen {
+        let panel_app = axum::Router::new()
+            .route("/panel", get(|| async { Redirect::permanent("/panel/") }))
+            .nest("/panel/", panel::resolve_router())
+            .route("/healthz", get(|| async { "ok" }))
+            .layer(cors)
+            .layer(TraceLayer::new_for_http());
+        let panel_listener = tokio::net::TcpListener::bind(panel_addr)
+            .await
+            .with_context(|| format!("bind panel {}", panel_addr))?;
+        info!(%panel_addr, "panel listen");
+        tokio::spawn(async move {
+            let _ = axum::serve(panel_listener, panel_app).await;
+        });
+    }
 
     startup_banner::print(&settings, storage);
     if postgres {
@@ -412,6 +467,57 @@ fn build_cors_layer() -> CorsLayer {
         .allow_headers(Any)
 }
 
+fn ensure_setup_token(data_dir: &std::path::Path) {
+    if std::env::var("BETTERMQ_SETUP_TOKEN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_some()
+    {
+        info!("local auth not configured — use BETTERMQ_SETUP_TOKEN for /panel setup");
+        return;
+    }
+    if matches!(
+        std::env::var("BETTERMQ_ALLOW_OPEN_SETUP")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    ) {
+        info!("local auth not configured — open setup allowed (BETTERMQ_ALLOW_OPEN_SETUP)");
+        return;
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    unsafe { std::env::set_var("BETTERMQ_SETUP_TOKEN", &token) };
+    let token_path = data_dir.join("setup-token.txt");
+    if let Err(e) = std::fs::write(&token_path, format!("{token}\n")) {
+        tracing::warn!(error = %e, "could not write setup-token.txt");
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    info!(
+        token_file = %token_path.display(),
+        "local auth not configured — setup token written"
+    );
+    eprintln!("BetterMQ setup token: {token}");
+    eprintln!("  header: x-bettermq-setup-token: {token}");
+    eprintln!("  or set BETTERMQ_ALLOW_OPEN_SETUP=1 for open local setup");
+}
+
+fn spawn_dispatch_backfill_loop(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.tick().await; // skip immediate tick (boot already backfills)
+        loop {
+            interval.tick().await;
+            state.dispatch.backfill_pending();
+        }
+    });
+}
+
 fn spawn_schedule_worker(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(200));
@@ -431,21 +537,51 @@ fn spawn_schedule_worker(state: Arc<AppState>) {
             let now = Utc::now().timestamp_millis();
 
             for pending in state.schedule.pop_due(now) {
-                fire_scheduled_publish(&state, pending).await;
+                let id = pending.id;
+                let deliver_at_ms = pending.deliver_at_ms;
+                let ok = fire_scheduled_publish(&state, pending.request.clone()).await;
+                if ok {
+                    if let Err(e) = state.schedule.complete(id) {
+                        tracing::warn!(error = %e, "schedule complete persist failed");
+                    }
+                } else if let Err(e) = state.schedule.requeue(broker_schedule::ScheduledPublish {
+                    id,
+                    deliver_at_ms,
+                    request: pending.request,
+                }) {
+                    tracing::warn!(error = %e, "schedule requeue after failed fire failed");
+                }
             }
 
             for job in state.crons.pop_due(now) {
                 tracing::info!(cron_id = %job.id, queue = %job.request.topic, "cron tick");
-                fire_scheduled_publish(&state, job.request).await;
+                let mut req = job.request.clone();
+                // Idempotent publish key absorbs brief dual-hold / retry.
+                if req.idempotency_key.is_none() {
+                    req.idempotency_key = Some(format!(
+                        "cron:{}:{}",
+                        job.id,
+                        job.last_run_at_ms.unwrap_or(now)
+                    ));
+                }
+                let ok = fire_scheduled_publish(&state, req).await;
+                if ok {
+                    if let Err(e) = state.crons.commit_fire(job.id) {
+                        tracing::warn!(error = %e, cron_id = %job.id, "cron commit_fire failed");
+                    }
+                } else if let Err(e) = state.crons.revert_fire(&job) {
+                    tracing::warn!(error = %e, cron_id = %job.id, "cron revert_fire failed");
+                }
             }
         }
     });
 }
 
+/// Returns true when the publish was accepted (including duplicates).
 async fn fire_scheduled_publish(
     state: &Arc<AppState>,
     pending: broker_schedule::ScheduledPublishRequest,
-) {
+) -> bool {
     let req = PublishRequest {
         topic: pending.topic,
         routing_key: pending.routing_key,
@@ -472,27 +608,122 @@ async fn fire_scheduled_publish(
     };
     if state.cluster.is_some() {
         match publish_with_cluster(state, req, None).await {
-            Ok(resp) if !resp.duplicate => {
-                enqueue_dispatch_after_publish(state, &resp);
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = ?e, "scheduled cluster publish failed"),
-        }
-        return;
-    }
-    match state.broker.publish_immediate(req) {
-        Ok(resp) if !resp.duplicate => {
-            if let (Some(partition), Some(offset), Some(message_id)) =
-                (resp.partition, resp.offset, resp.message_id)
-            {
-                if !broker_partition::is_dlq_topic(&resp.topic) {
-                    state.dispatch.enqueue(broker_dispatch::DeliveryJob::live(
-                        resp.topic, partition, offset, message_id,
-                    ));
+            Ok(resp) => {
+                if !resp.duplicate {
+                    enqueue_dispatch_after_publish(state, &resp);
                 }
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "scheduled cluster publish failed");
+                false
             }
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "scheduled enqueue failed"),
+    } else {
+        match state.broker.publish_immediate(req) {
+            Ok(resp) => {
+                if !resp.duplicate {
+                    if let (Some(partition), Some(offset), Some(message_id)) =
+                        (resp.partition, resp.offset, resp.message_id)
+                    {
+                        if !broker_partition::is_dlq_topic(&resp.topic) {
+                            state.dispatch.enqueue(broker_dispatch::DeliveryJob::live(
+                                resp.topic, partition, offset, message_id,
+                            ));
+                        }
+                    }
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "scheduled enqueue failed");
+                false
+            }
+        }
     }
+}
+
+fn spawn_fleet_workers(state: Arc<AppState>) {
+    let Some(client) = broker_dispatch::LeaseClient::from_env() else {
+        tracing::error!(
+            "dispatch fleet requires BETTERMQ_BROKER_URLS (comma-separated broker base URLs)"
+        );
+        return;
+    };
+    let concurrency = broker_dispatch::fleet_concurrency();
+    info!(
+        holder = %client.holder(),
+        brokers = ?client.broker_urls(),
+        concurrency,
+        "starting dispatch fleet workers"
+    );
+    let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    tokio::spawn(async move {
+        let mut rr = 0usize;
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            interval.tick().await;
+            let urls = client.broker_urls();
+            if urls.is_empty() {
+                continue;
+            }
+            rr = (rr + 1) % urls.len();
+            let broker = urls[rr].clone();
+            let permit = match sem.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            let client = client.clone();
+            let dispatch = state.dispatch.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let claimed = match client.claim(&broker, 4).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::debug!(error = %e, %broker, "fleet claim");
+                        return;
+                    }
+                };
+                for job in claimed.jobs {
+                    let Some(msg) = job.message.clone() else {
+                        let _ = client
+                            .fail(&broker, job.lease_id, "missing message envelope", true)
+                            .await;
+                        continue;
+                    };
+                    let hb = client.clone();
+                    let broker_hb = broker.clone();
+                    let lease_id = job.lease_id;
+                    let heartbeat = tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(Duration::from_secs(10));
+                        loop {
+                            tick.tick().await;
+                            if hb.heartbeat(&broker_hb, lease_id).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    match dispatch.push_http_only(&msg).await {
+                        Ok(()) => {
+                            heartbeat.abort();
+                            if let Err(e) = client.complete(&broker, job.lease_id).await {
+                                tracing::warn!(error = %e, "fleet complete failed");
+                            }
+                        }
+                        Err(e) => {
+                            heartbeat.abort();
+                            let dead = matches!(&e, broker_dispatch::DispatchError::NoDestination)
+                                || matches!(
+                                    &e,
+                                    broker_dispatch::DispatchError::Failed(s) if s.starts_with("egress")
+                                );
+                            let _ = client
+                                .fail(&broker, job.lease_id, &e.to_string(), dead)
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+    });
 }

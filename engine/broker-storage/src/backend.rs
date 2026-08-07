@@ -63,10 +63,21 @@ impl PartitionBackend {
         header: LogRecord,
         payload: Vec<u8>,
     ) -> Result<(StoredMessage, Vec<u8>), LogError> {
+        self.append_fenced(partition, header, payload, None)
+    }
+
+    /// Slate: optional fence generation stamped into the durable batch (HA M3).
+    pub fn append_fenced(
+        &mut self,
+        partition: u32,
+        header: LogRecord,
+        payload: Vec<u8>,
+        fence_generation: Option<u64>,
+    ) -> Result<(StoredMessage, Vec<u8>), LogError> {
         match self {
             Self::Local(log) => log.append(partition, header, payload),
             #[cfg(feature = "slate")]
-            Self::Slate(log) => log.append(partition, header, payload),
+            Self::Slate(log) => log.append_fenced(partition, header, payload, fence_generation),
         }
     }
 
@@ -74,11 +85,12 @@ impl PartitionBackend {
         &mut self,
         partition: u32,
         frame: &[u8],
+        expected_offset: Option<u64>,
     ) -> Result<StoredMessage, LogError> {
         match self {
-            Self::Local(log) => log.append_raw_frame(partition, frame),
+            Self::Local(log) => log.append_raw_frame(partition, frame, expected_offset),
             #[cfg(feature = "slate")]
-            Self::Slate(log) => log.append_raw_frame(partition, frame),
+            Self::Slate(log) => log.append_raw_frame(partition, frame, expected_offset),
         }
     }
 

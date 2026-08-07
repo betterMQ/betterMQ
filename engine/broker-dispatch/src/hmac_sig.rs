@@ -4,11 +4,14 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 /// `BetterMQ-Signature` header value: `t=<unix_ms>,v1=<hex_hmac>`
+///
+/// HMAC covers raw body bytes: `"{timestamp_ms}." || body` (not lossy UTF-8).
 pub fn sign_payload(secret: &str, body: &[u8], timestamp_ms: i64) -> String {
-    let payload = format!("{timestamp_ms}.{}", String::from_utf8_lossy(body));
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(payload.as_bytes());
+    mac.update(timestamp_ms.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(body);
     let result = mac.finalize().into_bytes();
     format!("t={timestamp_ms},v1={}", hex::encode(result))
 }

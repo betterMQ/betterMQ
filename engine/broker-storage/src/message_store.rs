@@ -24,6 +24,7 @@ pub trait MessageStore: Send + Sync {
         &mut self,
         partition: u32,
         frame: &[u8],
+        _expected_offset: Option<u64>,
     ) -> Result<StoredMessage, StoreError>;
 
     fn read_range(

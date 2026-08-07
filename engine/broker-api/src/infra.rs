@@ -787,11 +787,8 @@ pub async fn infra_cluster_register(
             "some peers did not accept membership push"
         );
     }
-    let new_peer_url = body.public_url.trim().trim_end_matches('/');
-    let snap = crate::cluster::catalog_snapshot(&state);
-    if crate::cluster::push_catalog_to_peer(new_peer_url, &snap).await {
-        tracing::info!(peer = %new_peer_url, "pushed catalog to newly registered node");
-    }
+    // HA M1: do not push catalog to registrant public_url (exfiltration risk).
+    // Joiner pulls catalog after proving membership (merge_catalog_from_peers).
     let generation = ClusterRuntime::load_config(&dir)
         .map(|c| c.generation)
         .unwrap_or(1);

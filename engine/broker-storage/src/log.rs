@@ -44,6 +44,8 @@ pub enum LogError {
     Io(#[from] io::Error),
     #[error("offset {0} not found")]
     OffsetNotFound(u64),
+    #[error("offset mismatch: have next={have}, want={want}")]
+    OffsetMismatch { have: u64, want: u64 },
     #[error("slate: {0}")]
     Slate(String),
 }
@@ -155,15 +157,62 @@ impl PartitionLog {
     }
 
     /// Append a pre-encoded broker-proto frame (follower replication).
+    /// When `expected_offset` is set, require `meta.next_offset == expected` (or
+    /// idempotent success if that offset is already present).
     pub fn append_raw_frame(
         &mut self,
         partition: u32,
         frame: &[u8],
+        expected_offset: Option<u64>,
     ) -> Result<StoredMessage, LogError> {
         let (header, payload) = {
             let mut cursor = std::io::Cursor::new(frame);
             decode_frame(&mut cursor)?
         };
+
+        if let Some(want) = expected_offset {
+            let have = self.meta.next_offset;
+            if have > want {
+                // Idempotent retry: already applied this offset.
+                if let Some(pos) = self.index.get(&want) {
+                    let (existing_header, existing_payload) = self.read_at(pos)?;
+                    if existing_header.id == header.id {
+                        return Ok(StoredMessage {
+                            id: existing_header.id,
+                            tenant_id: existing_header.tenant_id,
+                            topic: existing_header.topic,
+                            partition,
+                            offset: want,
+                            routing_key: existing_header.routing_key,
+                            payload: existing_payload,
+                            published_at_ms: existing_header.published_at_ms,
+                            priority: existing_header.priority,
+                            flow_parallelism: existing_header.flow_parallelism,
+                            flow_key: existing_header.flow_key.clone(),
+                            flow_rate: existing_header.flow_rate,
+                            flow_period_secs: existing_header.flow_period_secs,
+                            queue_id: existing_header.queue_id,
+                            group_id: existing_header.group_id,
+                            group_member_id: existing_header.group_member_id,
+                            flow_profile_id: existing_header.flow_profile_id,
+                            destination_url: existing_header.destination_url.clone(),
+                            destination_secret: existing_header.destination_secret.clone(),
+                            max_retries: existing_header.max_retries,
+                            retry_backoff: existing_header.retry_backoff.clone(),
+                            http_method: existing_header.http_method.clone(),
+                            http_headers_json: existing_header.http_headers_json.clone(),
+                            http_sign: existing_header.http_sign,
+                            payload_ref_json: existing_header.payload_ref_json.clone(),
+                        });
+                    }
+                }
+                return Err(LogError::OffsetMismatch { have, want });
+            }
+            if have < want {
+                return Err(LogError::OffsetMismatch { have, want });
+            }
+        }
+
         let offset = self.meta.next_offset;
         let byte_offset = self.wal_size;
         let wal_path = self.dir.join(WAL_FILE);
@@ -307,6 +356,13 @@ impl PartitionLog {
         );
 
         std::fs::rename(&wal_path, &seg_path)?;
+        // Durability of the segment rename (parent dir entry).
+        if let Ok(dir) = std::fs::File::open(self.dir.join(SEGMENTS_DIR)) {
+            let _ = dir.sync_all();
+        }
+        if let Ok(dir) = std::fs::File::open(&self.dir) {
+            let _ = dir.sync_all();
+        }
         let _ = std::fs::remove_file(&placeholder);
 
         self.meta.segment_roll_count += 1;

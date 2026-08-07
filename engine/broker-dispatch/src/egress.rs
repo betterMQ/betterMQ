@@ -6,6 +6,8 @@
 //! When that env flag is set, loopback / `localhost` and private LAN ranges are
 //! allowed (local self-host + integration tests). Link-local metadata IPs and
 //! hostnames stay blocked.
+//!
+//! Hostnames are resolved (A/AAAA) at validate time so DNS→private-IP is rejected.
 
 use std::net::IpAddr;
 use thiserror::Error;
@@ -21,11 +23,42 @@ pub enum EgressError {
     MissingHost,
     #[error("destination host is not allowed")]
     HostNotAllowed,
+    #[error("destination host could not be resolved")]
+    ResolveFailed,
 }
 
 /// Validate a webhook / queue destination before enqueue or delivery.
 pub fn validate_destination_url(raw: &str) -> Result<(), EgressError> {
     validate_destination_url_with(raw, allow_private_destinations())
+}
+
+/// Async validate: resolve DNS and reject blocked IPs (DNS rebinding defense).
+pub async fn validate_destination_url_resolved(raw: &str) -> Result<(), EgressError> {
+    let allow_private = allow_private_destinations();
+    validate_destination_url_with(raw, allow_private)?;
+    let parsed = Url::parse(raw.trim()).map_err(|_| EgressError::InvalidUrl)?;
+    let host = parsed
+        .host_str()
+        .ok_or(EgressError::MissingHost)?
+        .to_ascii_lowercase();
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let lookup = format!("{host}:0");
+    let addrs = tokio::net::lookup_host(&lookup)
+        .await
+        .map_err(|_| EgressError::ResolveFailed)?;
+    let mut any = false;
+    for addr in addrs {
+        any = true;
+        if is_blocked_destination_ip(addr.ip(), allow_private) {
+            return Err(EgressError::HostNotAllowed);
+        }
+    }
+    if !any {
+        return Err(EgressError::ResolveFailed);
+    }
+    Ok(())
 }
 
 fn validate_destination_url_with(raw: &str, allow_private: bool) -> Result<(), EgressError> {
@@ -66,9 +99,14 @@ fn is_blocked_hostname(host: &str, allow_private: bool) -> bool {
     if host == "localhost" || host.ends_with(".localhost") {
         return !allow_private;
     }
+    // Cloud metadata hostnames (always blocked).
     if host == "metadata.google.internal"
         || host == "metadata"
         || host.ends_with(".metadata.google.internal")
+        || host == "instance-data"
+        || host.ends_with(".instance-data")
+        || host == "metadata.azure.com"
+        || host.ends_with(".internal") && host.contains("metadata")
     {
         return true;
     }
@@ -142,6 +180,7 @@ mod tests {
         assert!(validate_destination_url_with("http://127.0.0.1/", false).is_err());
         assert!(validate_destination_url_with("http://localhost/hook", false).is_err());
         assert!(validate_destination_url_with("http://metadata.google.internal/", false).is_err());
+        assert!(validate_destination_url_with("http://instance-data/", false).is_err());
     }
 
     #[test]

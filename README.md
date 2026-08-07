@@ -51,6 +51,17 @@ flowchart LR
 
 Delivery is **at-least-once**. Use `idempotency_key` on publish/enqueue to dedupe accepts.
 
+### Honesty
+
+| Topic | Reality |
+|-------|---------|
+| Delivery | At-least-once; handlers must be idempotent |
+| HA | Fenced leaders + quorum/Slate + shared meta — not full Raft |
+| MinIO single-node | Dev only |
+| Roles | `serve` \| `--broker-only` \| `--dispatch-fleet` (same binary) |
+
+See [`selfhost/README.md`](selfhost/README.md) for compose profiles (solo → HA → Slate → fleet), including **panel on its own port** (`--panel-listen` / `BETTERMQ_PANEL_LISTEN`).
+
 ---
 
 ## Features
@@ -61,7 +72,7 @@ Delivery is **at-least-once**. Use `idempotency_key` on publish/enqueue to dedup
 - **Enqueue** — add jobs to a queue by `queue_id` (preferred) or name
 - **1:1 publish** — one-off delivery to any URL without creating a queue
 - **Groups (fan-out)** — `POST /v1/publish` with `group_id` delivers to every member webhook
-- **Batch ingest** — `POST /v1/enqueue/batch` (self-host: uncapped; cloud SaaS: max 100)
+- **Batch ingest** — `POST /v1/enqueue/batch`
 - **Gateway enqueue** — same body as batch; for stateless edge gateways
 
 ### Scheduling
@@ -123,11 +134,11 @@ open http://localhost:8080/panel/
 
 **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -c "irm https://betterMQ.com/install.ps1 | iex"`
 
-See [selfhost/README.md](selfhost/README.md) for options, Docker, and building from source.
+See [selfhost/README.md](selfhost/README.md) for options, **CLI reference**, Docker, and building from source.
 
 ### Deploy on Railway
 
-One-click cloud deploy (HTTPS, public URL, persistent `/data` volume):
+One-click deploy (HTTPS, public URL, persistent `/data` volume):
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/bettermq?referralCode=O5l32o&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
@@ -199,7 +210,7 @@ Endpoints marked **Public** below do not require a Bearer token.
 
 **Retention:** primary queue records are removed after successful push or DLQ move. DLQ entries remain until purged (`DELETE /v1/dlq`) or drained.
 
-**Egress:** destination URLs must be `http`/`https`. Loopback and private LAN hosts are blocked by default; set `betterMQ_ALLOW_PRIVATE_DESTINATIONS=1` for local webhooks. Cloud metadata hosts stay blocked.
+**Egress:** destination URLs must be `http`/`https`. Loopback and private LAN hosts are blocked by default; set `betterMQ_ALLOW_PRIVATE_DESTINATIONS=1` for local webhooks. Link-local / instance-metadata hosts stay blocked.
 
 ---
 
@@ -463,7 +474,7 @@ For publish, `queue` is the internal topic `__direct`. Omitted JSON fields are n
 }
 ```
 
-Self-host: no batch size cap. Cloud builds cap at 100 messages per request.
+No batch size cap by default (override with `BETTERMQ_MAX_HTTP_BODY_BYTES` / related limits if you need one).
 
 ---
 

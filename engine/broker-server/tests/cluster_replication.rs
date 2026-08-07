@@ -115,7 +115,7 @@ async fn replicated_frame_on_follower_and_leader_only_dispatch() {
     let frame = resp.replication_frame.expect("frame");
 
     broker_f
-        .append_replicated_frame(&resp.topic, partition, &frame)
+        .append_replicated_frame(&resp.topic, partition, &frame, resp.offset)
         .unwrap();
 
     let msgs = broker_f.list_topic_messages("jobs", 10).unwrap();

@@ -1,0 +1,93 @@
+# Self-host HA + Slate: 3 brokers + MinIO (no shared NFS).
+#
+#   cd selfhost && docker compose -f docker-compose.ha-slate.yml up -d --build
+#
+# HONESTY: single-node MinIO here is NOT multi-AZ object-store HA.
+# Use R2/S3 (or multi-node MinIO) in production.
+#
+# Panel: http://localhost:8081/panel/
+# Configure Slate storage (endpoint http://minio:9000, buckets bettermq +
+# bettermq-payloads) and create/join cluster from the panel.
+
+x-broker: &broker
+  image: ghcr.io/bettermq/bettermq:latest
+  build:
+    context: ..
+    dockerfile: selfhost/Dockerfile
+  environment:
+    BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:?set BETTERMQ_CLUSTER_SECRET}
+    S3_ENDPOINT: http://minio:9000
+    S3_BUCKET: bettermq
+    S3_PAYLOAD_BUCKET: bettermq-payloads
+    S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
+    S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
+    S3_REGION: us-east-1
+    BETTERMQ_STORAGE: slate
+  depends_on:
+    minio-init:
+      condition: service_completed_successfully
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 40s
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
+    entrypoint: >
+      /bin/sh -c "
+        until mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" 2>/dev/null; do sleep 1; done;
+        mc mb --ignore-existing local/bettermq;
+        mc mb --ignore-existing local/bettermq-payloads;
+        echo buckets ready;
+      "
+
+  broker1:
+    <<: *broker
+    ports:
+      - "8081:8080"
+    volumes:
+      - broker1-data:/data
+    command: ["serve", "--data-dir", "/data", "--listen", "0.0.0.0:8080"]
+
+  broker2:
+    <<: *broker
+    ports:
+      - "8082:8080"
+    volumes:
+      - broker2-data:/data
+    command: ["serve", "--data-dir", "/data", "--listen", "0.0.0.0:8080"]
+
+  broker3:
+    <<: *broker
+    ports:
+      - "8083:8080"
+    volumes:
+      - broker3-data:/data
+    command: ["serve", "--data-dir", "/data", "--listen", "0.0.0.0:8080"]
+
+volumes:
+  minio-data:
+  broker1-data:
+  broker2-data:
+  broker3-data:

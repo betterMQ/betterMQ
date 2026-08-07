@@ -1298,6 +1298,8 @@ async fn build_cron_scheduled_request(
     let url = req.url.as_deref().unwrap_or("").trim();
     let secret = req.secret.as_deref().unwrap_or("").trim();
     if !url.is_empty() && !secret.is_empty() {
+        broker_dispatch::validate_destination_url(url)
+            .map_err(|e| CronApiError::BadRequest(e.to_string()))?;
         let mut scheduled = ScheduledPublishRequest {
             topic: DIRECT_TOPIC.to_string(),
             routing_key: req.key.clone(),
@@ -1339,6 +1341,7 @@ async fn build_cron_scheduled_request(
                 ApiError::Broker(be) => CronApiError::BadRequest(be.to_string()),
                 ApiError::BadRequest(m) => CronApiError::BadRequest(m),
                 ApiError::ReplicationFailed(m) => CronApiError::BadRequest(m),
+                ApiError::Unauthorized(m) => CronApiError::BadRequest(m),
             })?;
     let mut scheduled = ScheduledPublishRequest {
         topic: destination

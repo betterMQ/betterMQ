@@ -80,9 +80,9 @@ impl SubscriptionRegistry {
     }
 
     fn save(&self, file: &SubscriptionFile) -> Result<(), SubscriptionError> {
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
-        std::fs::rename(tmp, &self.path)?;
+        let _lock = broker_storage::FileLock::exclusive(&self.path)?;
+        let bytes = serde_json::to_vec_pretty(file)?;
+        broker_storage::atomic_write_file(&self.path, &bytes)?;
         Ok(())
     }
 

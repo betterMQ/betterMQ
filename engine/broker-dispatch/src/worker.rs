@@ -13,9 +13,18 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tracing::{info, warn};
 use uuid::Uuid;
+
+/// Cap concurrent in-flight delivery tasks (HA M1). Override with BETTERMQ_DISPATCH_MAX_IN_FLIGHT.
+fn dispatch_max_in_flight() -> usize {
+    std::env::var("BETTERMQ_DISPATCH_MAX_IN_FLIGHT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256)
+        .max(1)
+}
 
 #[derive(Debug, Clone)]
 pub struct DispatchConfig {
@@ -42,8 +51,16 @@ impl Default for DispatchConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(7200);
+        let max_retries = std::env::var("BETTERMQ_DEFAULT_MAX_RETRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+        let retry_defaults = RetryDefaults {
+            max_retries,
+            ..RetryDefaults::default()
+        };
         Self {
-            retry_defaults: RetryDefaults::default(),
+            retry_defaults,
             http_timeout_secs,
             long_http_timeout_secs,
             long_payload_threshold_bytes: 256 * 1024,
@@ -89,10 +106,26 @@ pub enum DispatchError {
     Http(#[from] reqwest::Error),
     #[error("message has no push destination")]
     NoDestination,
+    #[error("{0}")]
+    Failed(String),
 }
 
 type ShardLeaderFn = Arc<dyn Fn(u32) -> bool + Send + Sync>;
 type DispatchGaps = Arc<Mutex<HashMap<(Uuid, u32), BTreeSet<u64>>>>;
+
+struct LeaseDrop {
+    leases: Option<crate::lease::LeaseTable>,
+    lease_id: Option<Uuid>,
+    holder: String,
+}
+
+impl Drop for LeaseDrop {
+    fn drop(&mut self) {
+        if let (Some(leases), Some(id)) = (&self.leases, self.lease_id) {
+            let _ = leases.take(id, &self.holder);
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct DispatchEngine {
@@ -106,36 +139,78 @@ pub struct DispatchEngine {
     is_shard_leader: Option<ShardLeaderFn>,
     host_blocker: Arc<HostBlocker>,
     memory_guard: Arc<MemoryGuard>,
+    in_flight: Arc<Semaphore>,
+    /// Shared lease table — same CAS path as fleet claim API.
+    leases: Option<crate::lease::LeaseTable>,
+    local_holder: String,
+    workers_enabled: bool,
 }
 
 impl DispatchEngine {
     pub fn new(broker: Broker, config: DispatchConfig) -> Self {
+        Self::new_with_mode(broker, config, true)
+    }
+
+    /// Broker-only: no local delivery workers (fleet claims via lease API).
+    pub fn new_broker_only(broker: Broker, config: DispatchConfig) -> Self {
+        Self::new_with_mode(broker, config, false)
+    }
+
+    fn new_with_mode(broker: Broker, config: DispatchConfig, workers_enabled: bool) -> Self {
         let (high_tx, high_rx) = mpsc::unbounded_channel();
         let config_clone = config.clone();
         let memory_guard = Arc::new(MemoryGuard::new(config_clone.memory_guard.clone()));
+        // Apply fleet long-wait tier when set (Phase E).
+        let long_secs =
+            crate::lease::long_wait_tier_secs().unwrap_or(config_clone.long_http_timeout_secs);
+        let global_max = std::env::var("BETTERMQ_DISPATCH_GLOBAL_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok());
         let engine = Self {
             broker,
             config,
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(config_clone.http_timeout_secs))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest short client"),
             long_client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
-                .timeout(Duration::from_secs(config_clone.long_http_timeout_secs))
+                .timeout(Duration::from_secs(long_secs))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest long client"),
             high_tx,
-            flow: FlowController::new(None, memory_guard.clone()),
+            flow: FlowController::new(global_max, memory_guard.clone()),
             dispatch_gaps: Arc::new(Mutex::new(HashMap::new())),
             is_shard_leader: None,
             host_blocker: Arc::new(HostBlocker::new(config_clone.host_blocker.clone())),
             memory_guard,
+            in_flight: Arc::new(Semaphore::new(dispatch_max_in_flight())),
+            leases: None,
+            local_holder: format!("local-{}", Uuid::new_v4()),
+            workers_enabled,
         };
         engine.memory_guard.spawn_monitor();
-        engine.spawn_workers(high_rx);
+        if workers_enabled {
+            engine.spawn_workers(high_rx);
+        }
         engine
+    }
+
+    pub fn with_leases(mut self, leases: crate::lease::LeaseTable) -> Self {
+        self.leases = Some(leases);
+        self
+    }
+
+    pub fn workers_enabled(&self) -> bool {
+        self.workers_enabled
+    }
+
+    /// Deliver a hydrated message (used by fleet workers).
+    pub async fn deliver_stored_message(&self, msg: &StoredMessage) -> Result<(), DispatchError> {
+        self.deliver_message(msg).await
     }
 
     pub fn host_blocker(&self) -> Arc<HostBlocker> {
@@ -160,6 +235,9 @@ impl DispatchEngine {
     }
 
     pub fn enqueue(&self, job: DeliveryJob) {
+        if !self.workers_enabled {
+            return;
+        }
         if !self.shard_leader(job.partition) {
             return;
         }
@@ -167,7 +245,11 @@ impl DispatchEngine {
     }
 
     /// Re-enqueue undelivered messages after restart (CP2.5 / CP7a).
+    /// Pages per partition from cursor → high-water mark (no global 50k cliff).
     pub fn backfill_pending(&self) {
+        if !self.workers_enabled {
+            return;
+        }
         if self.memory_guard.is_critical() {
             info!("dispatch backfill skipped: memory critical");
             return;
@@ -182,44 +264,67 @@ impl DispatchEngine {
         }
 
         let mut enqueued = 0u64;
+        const PAGE: usize = 500;
         for topic in topics {
             if broker_partition::is_dlq_topic(&topic) {
                 continue;
             }
-            let Ok(messages) = self.broker.list_topic_messages(&topic, 50_000) else {
+            let Ok(partition_count) = self.broker.partition_count(&topic) else {
                 continue;
             };
-            for msg in messages {
-                if !self.shard_leader(msg.partition) {
+            for partition in 0..partition_count {
+                if !self.shard_leader(partition) {
                     continue;
                 }
-                if msg
-                    .destination_url
-                    .as_ref()
-                    .map(|u| u.is_empty())
-                    .unwrap_or(true)
-                {
-                    continue;
+                // Walk messages in pages; broker list API may still cap — use offset cursor.
+                let mut from_offset = 0u64;
+                loop {
+                    let Ok(messages) =
+                        self.broker
+                            .list_topic_messages_from(&topic, partition, from_offset, PAGE)
+                    else {
+                        // Fallback to legacy list if paged API missing.
+                        break;
+                    };
+                    if messages.is_empty() {
+                        break;
+                    }
+                    let mut advanced = false;
+                    for msg in &messages {
+                        from_offset = from_offset.max(msg.offset.saturating_add(1));
+                        advanced = true;
+                        if msg
+                            .destination_url
+                            .as_ref()
+                            .map(|u| u.is_empty())
+                            .unwrap_or(true)
+                        {
+                            continue;
+                        }
+                        let lane_owner = msg
+                            .group_member_id
+                            .or(msg.queue_id)
+                            .or(msg.flow_profile_id)
+                            .unwrap_or(msg.id);
+                        let cursor = self
+                            .broker
+                            .dispatch_offset(&tenant_id, &lane_owner.to_string(), msg.partition)
+                            .unwrap_or(0);
+                        if msg.offset < cursor {
+                            continue;
+                        }
+                        self.enqueue(DeliveryJob::live(
+                            msg.topic.clone(),
+                            msg.partition,
+                            msg.offset,
+                            msg.id,
+                        ));
+                        enqueued += 1;
+                    }
+                    if !advanced || messages.len() < PAGE {
+                        break;
+                    }
                 }
-                let lane_owner = msg
-                    .group_member_id
-                    .or(msg.queue_id)
-                    .or(msg.flow_profile_id)
-                    .unwrap_or(msg.id);
-                let cursor = self
-                    .broker
-                    .dispatch_offset(&tenant_id, &lane_owner.to_string(), msg.partition)
-                    .unwrap_or(0);
-                if msg.offset < cursor {
-                    continue;
-                }
-                self.enqueue(DeliveryJob::live(
-                    msg.topic.clone(),
-                    msg.partition,
-                    msg.offset,
-                    msg.id,
-                ));
-                enqueued += 1;
             }
         }
         if enqueued > 0 {
@@ -234,7 +339,15 @@ impl DispatchEngine {
         tokio::spawn(async move {
             while let Some(job) = high_rx.recv().await {
                 let engine = this.clone();
+                let permit = match engine.in_flight.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!("dispatch semaphore closed");
+                        break;
+                    }
+                };
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = engine.deliver_job(job).await {
                         warn!(error = %e, "delivery job failed");
                     }
@@ -243,9 +356,32 @@ impl DispatchEngine {
         });
     }
 
+    /// Re-enqueue after a delay without advancing the dispatch cursor (pause / host block).
+    fn defer_job(&self, job: DeliveryJob, delay: Duration, reason: &'static str) {
+        let engine = self.clone();
+        info!(
+            topic = %job.topic,
+            partition = job.partition,
+            offset = job.offset,
+            delay_ms = delay.as_millis() as u64,
+            reason,
+            "delivery deferred; will retry"
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            engine.enqueue(job);
+        });
+    }
+
     async fn deliver_job(&self, job: DeliveryJob) -> Result<(), DispatchError> {
         if !self.shard_leader(job.partition) {
             return Ok(());
+        }
+        // Lease seam: skip if already claimed by fleet/another worker.
+        if let Some(leases) = &self.leases {
+            if leases.is_offset_leased(&job.topic, job.partition, job.offset) {
+                return Ok(());
+            }
         }
         let msg = match self
             .broker
@@ -265,12 +401,50 @@ impl DispatchEngine {
             }
         };
 
+        let lease_id = if let Some(leases) = &self.leases {
+            if leases.is_offset_leased(&job.topic, job.partition, job.offset) {
+                return Ok(());
+            }
+            let lane = msg
+                .group_member_id
+                .or(msg.queue_id)
+                .or(msg.flow_profile_id)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| msg.topic.clone());
+            let id = Uuid::new_v4();
+            leases.insert(
+                self.local_holder.clone(),
+                crate::lease::ClaimedJob {
+                    lease_id: id,
+                    topic: job.topic.clone(),
+                    partition: job.partition,
+                    offset: job.offset,
+                    message_id: job.message_id,
+                    expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+                    generation: 0,
+                    cursor_key: lane,
+                    message: None,
+                },
+            );
+            Some(id)
+        } else {
+            None
+        };
+        let _lease_guard = LeaseDrop {
+            leases: self.leases.clone(),
+            lease_id,
+            holder: self.local_holder.clone(),
+        };
+
         if msg
             .destination_url
             .as_ref()
             .map(|u| u.is_empty())
             .unwrap_or(true)
         {
+            let _ = self
+                .move_to_dlq(&msg, "missing destination URL — moved to DLQ")
+                .await;
             let _ = self
                 .broker
                 .try_purge_message(&job.topic, job.partition, job.offset);
@@ -280,6 +454,7 @@ impl DispatchEngine {
         if let Some(queue_id) = msg.queue_id {
             if let Some(queue) = self.broker.get_queue_by_id(queue_id)? {
                 if queue.paused {
+                    self.defer_job(job, Duration::from_secs(15), "queue_paused");
                     return Ok(());
                 }
             }
@@ -287,6 +462,7 @@ impl DispatchEngine {
         if let Some(member_id) = msg.group_member_id {
             if let Some(member) = self.broker.get_group_member(member_id)? {
                 if member.paused {
+                    self.defer_job(job, Duration::from_secs(15), "member_paused");
                     return Ok(());
                 }
             }
@@ -317,13 +493,31 @@ impl DispatchEngine {
             .filter(|u| !u.is_empty())
             .ok_or(DispatchError::NoDestination)?;
 
-        if let Err(e) = crate::egress::validate_destination_url(url) {
-            warn!(destination = %url, error = %e, "delivery skipped: destination blocked by egress policy");
+        if let Err(e) = crate::egress::validate_destination_url_resolved(url).await {
+            warn!(destination = %url, error = %e, "delivery blocked by egress policy — moving to DLQ");
+            self.move_to_dlq(msg, format!("destination blocked by egress policy: {e}"))
+                .await?;
+            let lane_owner = msg
+                .group_member_id
+                .or(msg.queue_id)
+                .or(msg.flow_profile_id)
+                .unwrap_or(msg.id);
+            let tenant_id = if !msg.tenant_id.is_empty() {
+                msg.tenant_id.clone()
+            } else {
+                self.broker.tenant()
+            };
+            self.commit_dispatch_offset(&tenant_id, lane_owner, msg.partition, msg.offset)
+                .await?;
+            let _ = self
+                .broker
+                .try_purge_message(&msg.topic, msg.partition, msg.offset);
             return Ok(());
         }
 
         if self.host_blocker.is_blocked(url) {
-            warn!(destination = %url, "delivery deferred: host blocked");
+            let job = DeliveryJob::live(msg.topic.clone(), msg.partition, msg.offset, msg.id);
+            self.defer_job(job, Duration::from_secs(30), "host_blocked");
             return Ok(());
         }
         let _secret = msg
@@ -355,8 +549,10 @@ impl DispatchEngine {
             warn!(
                 error = %e,
                 message_id = %msg.id,
-                "delivery skipped: could not load payload blob"
+                "delivery deferred: could not load payload blob"
             );
+            let job = DeliveryJob::live(msg.topic.clone(), msg.partition, msg.offset, msg.id);
+            self.defer_job(job, Duration::from_secs(10), "hydrate_failed");
             return Ok(());
         }
 
@@ -557,5 +753,38 @@ impl DispatchEngine {
             "message moved to DLQ"
         );
         Ok(())
+    }
+
+    /// Fleet push: HTTP only (no local cursor). Caller completes/fails the lease on the broker.
+    pub async fn push_http_only(&self, msg: &StoredMessage) -> Result<(), DispatchError> {
+        self.memory_guard.wait_below_limit().await;
+        let url = msg
+            .destination_url
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .ok_or(DispatchError::NoDestination)?;
+        if let Err(e) = crate::egress::validate_destination_url_resolved(url).await {
+            return Err(DispatchError::Failed(format!("egress: {e}")));
+        }
+        if self.host_blocker.is_blocked(url) {
+            return Err(DispatchError::Failed("host blocked".into()));
+        }
+        let outbound = build_outbound(msg);
+        let http = if msg.payload.len() >= self.config.long_payload_threshold_bytes {
+            &self.long_client
+        } else {
+            &self.client
+        };
+        let response = apply_to_reqwest(http, url, outbound).send().await?;
+        if response.status().is_success() {
+            self.host_blocker.record_success(url);
+            Ok(())
+        } else {
+            let status = response.status().as_u16();
+            if !self.config.non_retry_status_codes.contains(&status) {
+                self.host_blocker.record_transport_failure(url);
+            }
+            Err(DispatchError::Failed(format!("HTTP {status}")))
+        }
     }
 }

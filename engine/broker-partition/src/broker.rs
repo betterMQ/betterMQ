@@ -88,7 +88,8 @@ pub enum BrokerError {
     NotShardLeader(u32),
 }
 
-type ShardLeaderFn = Arc<dyn Fn(u32) -> bool + Send + Sync>;
+/// Returns `Some(generation)` when this node is leader for the shard (Slate fence).
+type ShardFenceFn = Arc<dyn Fn(u32) -> Option<u64> + Send + Sync>;
 
 /// Frozen at schedule/enqueue time so later queue URL edits do not affect in-flight jobs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,7 +220,7 @@ struct BrokerInner {
     groups: GroupRegistry,
     blob_store: BlobStore,
     topics: Mutex<HashMap<String, TopicState>>,
-    shard_leader_check: Mutex<Option<ShardLeaderFn>>,
+    shard_leader_check: Mutex<Option<ShardFenceFn>>,
     #[cfg(feature = "slate")]
     slate: Option<SlateEnv>,
 }
@@ -232,12 +233,6 @@ impl Broker {
 
     pub fn open(config: BrokerConfig) -> Result<Self, BrokerError> {
         let rocks_path = config.data_dir.join("rocksdb");
-        let metadata = MetadataStore::open(rocks_path)?;
-        let subscriptions = SubscriptionRegistry::open(&config.data_dir)?;
-        subscriptions.compact_duplicates()?;
-        let flows = FlowProfileRegistry::open(&config.data_dir)?;
-        let groups = GroupRegistry::open(&config.data_dir)?;
-        let blob_store = crate::blob::open_blob_store(&config.data_dir, config.storage)?;
 
         #[cfg(feature = "slate")]
         let slate = if config.storage == StorageMode::Slate {
@@ -249,7 +244,7 @@ impl Broker {
                 .map_err(|e| BrokerError::Storage(broker_storage::LogError::Io(e)))?;
             tracing::info!(
                 cache = %cache_root.display(),
-                "SlateDB storage enabled (messages on S3/MinIO, indexes in RocksDB)"
+                "SlateDB storage enabled (messages + indexes on object store)"
             );
             Some(SlateEnv {
                 object_store,
@@ -265,6 +260,27 @@ impl Broker {
                 "rebuild bettermq with --features slate (enabled in stack docker image)".into(),
             )));
         }
+
+        let metadata = {
+            #[cfg(feature = "slate")]
+            {
+                if let Some(ref env) = slate {
+                    MetadataStore::open_slate(Arc::clone(&env.object_store), &env.cache_root)?
+                } else {
+                    MetadataStore::open(rocks_path)?
+                }
+            }
+            #[cfg(not(feature = "slate"))]
+            {
+                MetadataStore::open(rocks_path)?
+            }
+        };
+
+        let subscriptions = SubscriptionRegistry::open(&config.data_dir)?;
+        subscriptions.compact_duplicates()?;
+        let flows = FlowProfileRegistry::open(&config.data_dir)?;
+        let groups = GroupRegistry::open(&config.data_dir)?;
+        let blob_store = crate::blob::open_blob_store(&config.data_dir, config.storage)?;
 
         Ok(Self {
             inner: Arc::new(BrokerInner {
@@ -282,21 +298,24 @@ impl Broker {
         })
     }
 
-    /// Slate + cluster: only the elected shard leader may append to shared object storage.
-    pub fn set_shard_leader_check(&self, check: ShardLeaderFn) {
+    /// Slate + cluster: only the elected shard leader may append; generation is the fence token.
+    pub fn set_shard_leader_check(&self, check: ShardFenceFn) {
         *self.inner.shard_leader_check.lock() = Some(check);
     }
 
-    fn require_shard_leader(&self, partition: u32) -> Result<(), BrokerError> {
+    /// Returns fence generation when this node may append (Slate + cluster).
+    fn require_shard_fence(&self, partition: u32) -> Result<Option<u64>, BrokerError> {
         if self.inner.config.storage != StorageMode::Slate {
-            return Ok(());
+            return Ok(None);
         }
         if let Some(check) = self.inner.shard_leader_check.lock().as_ref() {
-            if !check(partition) {
-                return Err(BrokerError::NotShardLeader(partition));
+            match check(partition) {
+                Some(gen) => Ok(Some(gen)),
+                None => Err(BrokerError::NotShardLeader(partition)),
             }
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
     /// Drop in-memory Slate handles when this node loses shard leadership (CP6b.1).
@@ -494,10 +513,8 @@ impl Broker {
     pub fn publish(&self, mut req: PublishRequest) -> Result<PublishResponse, BrokerError> {
         let tenant_id = self.tenant();
         let payload = decode_payload(&req)?;
-        let message_id = Uuid::new_v4();
-        let (log_payload, payload_ref_json) =
-            prepare_for_log(&self.inner.blob_store, &tenant_id, message_id, payload)?;
 
+        // Dedup before blob write so duplicate hits do not leave orphan payloads.
         if let Some(ref key) = req.idempotency_key {
             if let Some(entry) = self.inner.metadata.get_dedup(&tenant_id, key)? {
                 return Ok(PublishResponse {
@@ -511,6 +528,11 @@ impl Broker {
                 });
             }
         }
+
+        let message_id = Uuid::new_v4();
+        // Large payloads may write a blob before append; crash orphans are GC'd later.
+        let (log_payload, payload_ref_json) =
+            prepare_for_log(&self.inner.blob_store, &tenant_id, message_id, payload)?;
 
         let _ = req.delay_ms.take();
 
@@ -559,7 +581,7 @@ impl Broker {
             &req.routing_key,
             self.inner.config.partitions,
         );
-        self.require_shard_leader(partition)?;
+        let fence_gen = self.require_shard_fence(partition)?;
 
         let http = HttpDeliverySpec::merge(
             req.method.clone(),
@@ -596,7 +618,7 @@ impl Broker {
                 http_sign: Some(http.sign),
                 payload_ref_json,
             };
-            log.append(partition, header, log_payload)
+            log.append_fenced(partition, header, log_payload, fence_gen)
         })?;
 
         if let Some(ref key) = req.idempotency_key {
@@ -622,12 +644,22 @@ impl Broker {
         })
     }
 
+    /// Remove an idempotency mapping (used when replication quorum fails after local append).
+    pub fn clear_publish_dedup(&self, idempotency_key: &str) -> Result<(), BrokerError> {
+        let tenant_id = self.tenant();
+        self.inner
+            .metadata
+            .delete_dedup(&tenant_id, idempotency_key)?;
+        Ok(())
+    }
+
     /// Apply a replicated log frame on a follower (CP7a). Disabled in slate mode (CP6b.1).
     pub fn append_replicated_frame(
         &self,
         topic: &str,
         partition: u32,
         frame: &[u8],
+        expected_offset: Option<u64>,
     ) -> Result<PublishResponse, BrokerError> {
         if self.inner.config.storage == StorageMode::Slate {
             return Err(BrokerError::Storage(broker_storage::LogError::Slate(
@@ -636,7 +668,7 @@ impl Broker {
             )));
         }
         let stored = self.with_partition_log(topic, partition, |log| {
-            log.append_raw_frame(partition, frame)
+            log.append_raw_frame(partition, frame, expected_offset)
         })?;
         Ok(PublishResponse {
             message_id: Some(stored.id),
@@ -702,6 +734,26 @@ impl Broker {
         messages.sort_by_key(|m| (m.partition, m.offset));
         messages.truncate(max_messages);
         Ok(messages)
+    }
+
+    pub fn partition_count(&self, _topic: &str) -> Result<u32, BrokerError> {
+        Ok(self.inner.config.partitions)
+    }
+
+    /// Page messages for one partition starting at `from_offset` (inclusive).
+    pub fn list_topic_messages_from(
+        &self,
+        topic: &str,
+        partition: u32,
+        from_offset: u64,
+        max_messages: usize,
+    ) -> Result<Vec<StoredMessage>, BrokerError> {
+        if max_messages == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_partition_log(topic, partition, |log| {
+            log.read_range(partition, from_offset, max_messages)
+        })
     }
 
     /// Drop a primary-queue record from the partition log (not used for `*. __dlq` topics).

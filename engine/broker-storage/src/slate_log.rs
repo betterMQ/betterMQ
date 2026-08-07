@@ -1,4 +1,4 @@
-//! Partition log backed by SlateDB on object storage (CP3b).
+//! Durable SlateDB partition log on object storage (HA M3).
 
 #[cfg(feature = "slate")]
 use crate::log::PartitionLogConfig;
@@ -13,7 +13,9 @@ use bytes::Bytes;
 #[cfg(feature = "slate")]
 use object_store::ObjectStore;
 #[cfg(feature = "slate")]
-use slatedb::Db;
+use slatedb::config::WriteOptions;
+#[cfg(feature = "slate")]
+use slatedb::{Db, WriteBatch};
 #[cfg(feature = "slate")]
 use std::future::Future;
 #[cfg(feature = "slate")]
@@ -39,14 +41,13 @@ fn slate_runtime() -> &'static Runtime {
 
 /// Run SlateDB async IO from sync partition APIs (called under `#[tokio::main]`).
 #[cfg(feature = "slate")]
-fn block_on_slate<F, T>(future: F) -> T
+pub(crate) fn block_on_slate<F, T>(future: F) -> T
 where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
     let rt = slate_runtime();
     if Handle::try_current().is_ok() {
-        // Run on a separate thread so axum/dispatch workers stay responsive.
         std::thread::scope(|scope| scope.spawn(|| rt.block_on(future)).join().unwrap())
     } else {
         rt.block_on(future)
@@ -60,6 +61,8 @@ fn frame_key(offset: u64) -> Vec<u8> {
 
 #[cfg(feature = "slate")]
 const META_NEXT_OFFSET: &[u8] = b"meta/next_offset";
+#[cfg(feature = "slate")]
+const META_LEADER_GEN: &[u8] = b"meta/leader_generation";
 
 /// Stable object-store prefix shared by every broker in a cluster (not per-node `data_dir`).
 #[cfg(feature = "slate")]
@@ -68,9 +71,18 @@ pub fn slate_db_path(tenant_id: &str, topic: &str, partition: u32) -> String {
 }
 
 #[cfg(feature = "slate")]
+fn durable_write_opts() -> WriteOptions {
+    WriteOptions {
+        await_durable: true,
+        seqnum: 0,
+    }
+}
+
+#[cfg(feature = "slate")]
 pub struct SlatePartitionLog {
     db: Arc<Db>,
     next_offset: u64,
+    leader_generation: u64,
     _config: PartitionLogConfig,
 }
 
@@ -88,11 +100,26 @@ impl SlatePartitionLog {
             Arc::new(block_on_slate(Db::open(db_path.clone(), object_store)).map_err(slate_err)?);
 
         let next_offset = Self::recover_next_offset(Arc::clone(&db), partition)?;
+        let leader_generation = Self::read_leader_generation(Arc::clone(&db))?;
 
         Ok(Self {
             db,
             next_offset,
+            leader_generation,
             _config: config,
+        })
+    }
+
+    fn read_leader_generation(db: Arc<Db>) -> Result<u64, LogError> {
+        block_on_slate(async move {
+            match db.get(META_LEADER_GEN).await.map_err(slate_err)? {
+                Some(bytes) if bytes.len() >= 8 => {
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&bytes[..8]);
+                    Ok(u64::from_be_bytes(buf))
+                }
+                _ => Ok(0u64),
+            }
         })
     }
 
@@ -125,16 +152,15 @@ impl SlatePartitionLog {
         Ok(next)
     }
 
-    fn persist_next_offset(&self) -> Result<(), LogError> {
-        let db = Arc::clone(&self.db);
-        let bytes = self.next_offset.to_be_bytes();
-        block_on_slate(async move {
-            let _h = db
-                .put(META_NEXT_OFFSET, bytes.as_slice())
-                .await
-                .map_err(slate_err)?;
-            Ok::<(), LogError>(())
-        })
+    /// Reject stale leaders; stamp a higher generation into the next durable batch.
+    pub fn require_fence(&mut self, generation: u64) -> Result<(), LogError> {
+        if generation < self.leader_generation {
+            return Err(LogError::Slate(format!(
+                "stale leader fence: our generation {generation} < stored {}",
+                self.leader_generation
+            )));
+        }
+        Ok(())
     }
 
     pub fn append(
@@ -145,7 +171,23 @@ impl SlatePartitionLog {
     ) -> Result<(StoredMessage, Vec<u8>), LogError> {
         let mut frame = Vec::new();
         encode_frame(&header, &payload, &mut frame)?;
-        self.append_frame(partition, header, payload, frame)
+        self.append_frame(partition, header, payload, frame, None)
+    }
+
+    /// Append with an optional leadership fence token (HA M3).
+    pub fn append_fenced(
+        &mut self,
+        partition: u32,
+        header: LogRecord,
+        payload: Vec<u8>,
+        fence_generation: Option<u64>,
+    ) -> Result<(StoredMessage, Vec<u8>), LogError> {
+        if let Some(gen) = fence_generation {
+            self.require_fence(gen)?;
+        }
+        let mut frame = Vec::new();
+        encode_frame(&header, &payload, &mut frame)?;
+        self.append_frame(partition, header, payload, frame, fence_generation)
     }
 
     fn append_frame(
@@ -154,21 +196,44 @@ impl SlatePartitionLog {
         header: LogRecord,
         payload: Vec<u8>,
         frame: Vec<u8>,
+        fence_generation: Option<u64>,
     ) -> Result<(StoredMessage, Vec<u8>), LogError> {
         let offset = self.next_offset;
+        let next = offset + 1;
         let db = Arc::clone(&self.db);
         let key = frame_key(offset);
         let frame_bytes = Bytes::from(frame.clone());
+        let next_bytes = next.to_be_bytes();
+        let stamp_gen = fence_generation.filter(|g| *g > self.leader_generation);
+        let gen_bytes = stamp_gen.map(|g| g.to_be_bytes());
+
         block_on_slate(async move {
+            let mut batch = WriteBatch::new();
+            batch.put_bytes(Bytes::from(key), frame_bytes);
+            batch.put_bytes(
+                Bytes::copy_from_slice(META_NEXT_OFFSET),
+                Bytes::copy_from_slice(&next_bytes),
+            );
+            if let Some(gb) = gen_bytes {
+                batch.put_bytes(
+                    Bytes::copy_from_slice(META_LEADER_GEN),
+                    Bytes::copy_from_slice(&gb),
+                );
+            }
+            let opts = durable_write_opts();
             let _h = db
-                .put_bytes(Bytes::from(key), frame_bytes)
+                .write_with_options(batch, &opts)
                 .await
                 .map_err(slate_err)?;
+            // Explicit flush so ACK is only after object-store durability.
+            db.flush().await.map_err(slate_err)?;
             Ok::<(), LogError>(())
         })?;
-        self.next_offset = offset + 1;
-        // Always persist offset after a durable frame (CP6b.2).
-        self.persist_next_offset()?;
+
+        self.next_offset = next;
+        if let Some(g) = stamp_gen {
+            self.leader_generation = g;
+        }
         let stored = stored_from_header(header, partition, offset, payload);
         Ok((stored, frame))
     }
@@ -177,12 +242,19 @@ impl SlatePartitionLog {
         &mut self,
         partition: u32,
         frame: &[u8],
+        expected_offset: Option<u64>,
     ) -> Result<StoredMessage, LogError> {
+        if let Some(want) = expected_offset {
+            let have = self.next_offset;
+            if have != want {
+                return Err(LogError::OffsetMismatch { have, want });
+            }
+        }
         let (header, payload) = {
             let mut cursor = std::io::Cursor::new(frame);
             decode_frame(&mut cursor)?
         };
-        let (stored, _) = self.append_frame(partition, header, payload, frame.to_vec())?;
+        let (stored, _) = self.append_frame(partition, header, payload, frame.to_vec(), None)?;
         Ok(stored)
     }
 
@@ -222,14 +294,36 @@ impl SlatePartitionLog {
         let db = Arc::clone(&self.db);
         let key = frame_key(offset);
         block_on_slate(async move {
-            let _h = db.delete(&key).await.map_err(slate_err)?;
+            let opts = durable_write_opts();
+            let mut batch = WriteBatch::new();
+            batch.delete(key);
+            let _h = db
+                .write_with_options(batch, &opts)
+                .await
+                .map_err(slate_err)?;
+            db.flush().await.map_err(slate_err)?;
             Ok::<(), LogError>(())
         })
         .is_ok()
     }
 
     pub fn sync(&mut self) -> Result<(), LogError> {
-        self.persist_next_offset()
+        let db = Arc::clone(&self.db);
+        let next = self.next_offset.to_be_bytes();
+        block_on_slate(async move {
+            let mut batch = WriteBatch::new();
+            batch.put_bytes(
+                Bytes::copy_from_slice(META_NEXT_OFFSET),
+                Bytes::copy_from_slice(&next),
+            );
+            let opts = durable_write_opts();
+            let _h = db
+                .write_with_options(batch, &opts)
+                .await
+                .map_err(slate_err)?;
+            db.flush().await.map_err(slate_err)?;
+            Ok::<(), LogError>(())
+        })
     }
 }
 
