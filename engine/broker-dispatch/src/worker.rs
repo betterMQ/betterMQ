@@ -278,14 +278,10 @@ impl DispatchEngine {
                 }
                 // Walk messages in pages; broker list API may still cap — use offset cursor.
                 let mut from_offset = 0u64;
-                loop {
-                    let Ok(messages) =
-                        self.broker
-                            .list_topic_messages_from(&topic, partition, from_offset, PAGE)
-                    else {
-                        // Fallback to legacy list if paged API missing.
-                        break;
-                    };
+                while let Ok(messages) =
+                    self.broker
+                        .list_topic_messages_from(&topic, partition, from_offset, PAGE)
+                {
                     if messages.is_empty() {
                         break;
                     }
