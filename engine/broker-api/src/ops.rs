@@ -192,6 +192,7 @@ pub fn metrics_snapshot(state: &AppState) -> MetricsResponse {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn metrics_snapshot_from(
     blocked_hosts: usize,
     memory_critical: bool,

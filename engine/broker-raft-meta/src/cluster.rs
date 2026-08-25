@@ -466,7 +466,7 @@ impl ClusterRuntime {
             .as_ref()
             .map(|c| c.state().min_isr as usize)
             .filter(|v| *v > 0)
-            .unwrap_or_else(|| if rf >= 3 { 2 } else { 1 })
+            .unwrap_or(if rf >= 3 { 2 } else { 1 })
             .clamp(1, rf);
         (peers, min_isr)
     }

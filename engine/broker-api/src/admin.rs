@@ -1374,7 +1374,7 @@ async fn expand_replication(
     let addr = if advertise_url.is_empty() {
         None
     } else {
-        Some(validate_attach_url(advertise_url).map_err(|e| e)?)
+        Some(validate_attach_url(advertise_url)?)
     };
     if !node_name.is_empty() {
         if let Some(addr) = addr.clone() {

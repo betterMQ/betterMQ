@@ -214,6 +214,7 @@ impl SubscriptionRegistry {
     }
 
     /// Create or update a queue (one row per tenant + queue name). Changing `url` only affects new enqueues.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         tenant_id: &str,

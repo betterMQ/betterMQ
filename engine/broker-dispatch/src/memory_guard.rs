@@ -54,9 +54,7 @@ impl MemoryGuard {
     /// Sample RSS while a memory limit is configured. Returns `None` when there is
     /// nothing to monitor so shutdown does not have a leftover `Interval`.
     pub fn spawn_monitor(self: &std::sync::Arc<Self>) -> Option<JoinHandle<()>> {
-        if self.cfg.limit_mb.is_none() {
-            return None;
-        }
+        self.cfg.limit_mb?;
         let guard = std::sync::Arc::clone(self);
         Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));

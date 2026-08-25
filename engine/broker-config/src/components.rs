@@ -278,15 +278,13 @@ impl ResolvedListeners {
         if self.collapsed {
             return Ok(());
         }
-        if components.contains(Component::Controller) || components.contains(Component::Broker) {
-            if is_unspecified_public(&self.internal)
-                && std::env::var("BETTERMQ_SAAS").ok().as_deref() == Some("1")
-            {
-                return Err(ConfigError::Invalid(
-                    "internal listener must not bind a public unspecified address in SaaS mode"
-                        .into(),
-                ));
-            }
+        if (components.contains(Component::Controller) || components.contains(Component::Broker))
+            && is_unspecified_public(&self.internal)
+            && std::env::var("BETTERMQ_SAAS").ok().as_deref() == Some("1")
+        {
+            return Err(ConfigError::Invalid(
+                "internal listener must not bind a public unspecified address in SaaS mode".into(),
+            ));
         }
         Ok(())
     }
