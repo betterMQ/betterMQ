@@ -11,6 +11,7 @@ mod election;
 mod epoch;
 mod network;
 mod placement;
+mod rocks_store;
 mod telemetry;
 
 pub use cluster::{ClusterConfig, ClusterError, ClusterRuntime, NodeConfig, SchedulerLease};
@@ -31,4 +32,5 @@ pub use placement::{
     initial_controller_voters, place_replicas, replication_policy, CatalogRecord, DataNodeRecord,
     RebalanceOp, DEFAULT_MIN_ISR, DEFAULT_RF,
 };
+pub use rocks_store::RocksStore;
 pub use telemetry::{controller_telemetry_snapshot, ControllerTelemetrySnapshot};

@@ -1,7 +1,10 @@
-# Transitive advisories we cannot bump without a new object_store/SlateDB release.
+# Transitive advisories we cannot bump without a new object_store/SlateDB/rust_decimal release.
 [advisories]
 ignore = [
     # object_store 0.12 pins quick-xml 0.38 (NsReader DoS / quadratic attrs).
     "RUSTSEC-2026-0195",
     "RUSTSEC-2026-0194",
+    # rust_decimal optionally depends on rkyv 0.7 (via openraft/byte-unit and slatedb/duration-str).
+    # We never enable that feature; rkyv is not compiled. 0.7 has no patched release.
+    "RUSTSEC-2026-0235",
 ]

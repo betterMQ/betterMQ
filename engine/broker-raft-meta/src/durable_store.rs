@@ -1,15 +1,15 @@
-//! Durability wrapper around OpenRaft's official RocksDB example store.
+//! Durability wrapper around the local Tokio RocksDB Raft store.
 //!
 //! The example store exercises the complete storage suite but some mutating
 //! calls return before an explicit WAL sync. Raft requires votes and log writes
 //! to be stable before acknowledging them, so this wrapper adds that barrier.
 
+use crate::rocks_store::{RocksResponse, RocksStore, TypeConfig};
 use openraft::storage::{LogState, Snapshot};
 use openraft::{
     Entry, LogId, OptionalSend, RaftLogReader, RaftSnapshotBuilder, RaftStorage, SnapshotMeta,
     StorageError, StorageIOError, StoredMembership, Vote,
 };
-use openraft_rocksstore::{RocksResponse, RocksStore, TypeConfig};
 use std::fmt::Debug;
 use std::ops::RangeBounds;
 use std::sync::Arc;

@@ -11,10 +11,10 @@ use crate::placement::{
     initial_controller_voters, min_isr_for, pick_leader, place_replicas, replication_policy,
     upsert_catalog, CatalogRecord, DataNodeRecord, RebalanceOp,
 };
+pub use crate::rocks_store::TypeConfig;
+use crate::rocks_store::{RocksRequest, RocksStore};
 use openraft::storage::Adaptor;
 use openraft::{BasicNode, Config, Raft, ServerState, SnapshotPolicy};
-pub use openraft_rocksstore::TypeConfig;
-use openraft_rocksstore::{RocksRequest, RocksStore};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};

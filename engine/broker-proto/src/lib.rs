@@ -1,5 +1,6 @@
 //! Wire format and shared domain types for BetterMQ.
 
+pub mod codec;
 pub mod epoch;
 pub mod paths;
 pub mod record;
@@ -10,6 +11,7 @@ pub mod stable_hash;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const RECORD_MAGIC: [u8; 4] = *b"SBK1";
 
+pub use codec::{decode, encode};
 pub use epoch::{
     decode_epoch, encode_epoch, EpochError, EpochHeader, EPOCH_FORMAT_V2, EPOCH_HEADER_BYTES,
     EPOCH_MAGIC,

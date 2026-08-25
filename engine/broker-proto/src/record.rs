@@ -33,8 +33,10 @@ pub enum RecordError {
     },
     #[error("io error: {0}")]
     Io(#[from] io::Error),
+    #[error("encode error: {0}")]
+    Encode(#[from] bincode_next::error::EncodeError),
     #[error("decode error: {0}")]
-    Decode(#[from] bincode::Error),
+    Decode(#[from] bincode_next::error::DecodeError),
 }
 
 fn default_priority() -> u8 {
@@ -112,11 +114,11 @@ struct LogRecordLegacy {
 }
 
 impl LogRecord {
-    pub fn decode_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        match bincode::deserialize::<Self>(bytes) {
+    pub fn decode_bytes(bytes: &[u8]) -> Result<Self, bincode_next::error::DecodeError> {
+        match crate::codec::decode::<Self>(bytes) {
             Ok(r) => Ok(r),
             Err(_) => {
-                let leg: LogRecordLegacy = bincode::deserialize(bytes)?;
+                let leg: LogRecordLegacy = crate::codec::decode(bytes)?;
                 Ok(Self {
                     id: leg.id,
                     tenant_id: leg.tenant_id,
@@ -197,7 +199,7 @@ pub fn encode_frame(
     payload: &[u8],
     writer: &mut impl Write,
 ) -> Result<(), RecordError> {
-    let header_bytes = bincode::serialize(header)?;
+    let header_bytes = crate::codec::encode(header)?;
     if header_bytes.len() > MAX_FRAME_HEADER_BYTES || payload.len() > max_frame_payload_bytes() {
         return Err(RecordError::FrameTooLarge {
             header_len: header_bytes.len(),

@@ -12,7 +12,7 @@ slate = ["s3", "dep:slatedb"]
 
 [dependencies]
 broker-proto = { workspace = true }
-bincode = { workspace = true }
+bincode-next = { workspace = true }
 rocksdb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

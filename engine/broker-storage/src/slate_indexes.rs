@@ -16,8 +16,10 @@ pub enum SlateIndexError {
     Io(#[from] std::io::Error),
     #[error("slate: {0}")]
     Slate(String),
-    #[error("serde: {0}")]
-    Serde(#[from] bincode::Error),
+    #[error("encode error: {0}")]
+    Encode(#[from] bincode_next::error::EncodeError),
+    #[error("decode error: {0}")]
+    Decode(#[from] bincode_next::error::DecodeError),
 }
 
 const INDEX_DB_PATH: &str = "bettermq/_indexes";
@@ -66,7 +68,7 @@ impl SlateMetadataStore {
                 .map_err(|e| SlateIndexError::Slate(e.to_string()))
         })?;
         match bytes {
-            Some(b) => Ok(Some(bincode::deserialize(&b)?)),
+            Some(b) => Ok(Some(broker_proto::decode(&b)?)),
             None => Ok(None),
         }
     }
@@ -78,7 +80,7 @@ impl SlateMetadataStore {
         entry: &DedupEntry,
     ) -> Result<(), SlateIndexError> {
         let key = Self::dedup_key(tenant_id, idempotency_key);
-        let value = bincode::serialize(entry)?;
+        let value = broker_proto::encode(entry)?;
         let db = Arc::clone(&self.db);
         block_on_slate(async move {
             let mut batch = WriteBatch::new();

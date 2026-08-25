@@ -1,8 +1,7 @@
-use broker_raft_meta::DurableRocksStore;
+use broker_raft_meta::{DurableRocksStore, RocksStore, TypeConfig};
 use openraft::storage::Adaptor;
 use openraft::testing::{StoreBuilder, Suite};
 use openraft::StorageError;
-use openraft_rocksstore::{RocksStore, TypeConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
 

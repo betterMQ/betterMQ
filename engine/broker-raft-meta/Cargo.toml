@@ -15,10 +15,10 @@ chrono = { workspace = true }
 parking_lot = { workspace = true }
 broker-storage = { path = "../broker-storage" }
 openraft = { version = "0.9.25", features = ["serde"] }
-openraft-rocksstore = "0.9.21"
 tokio = { workspace = true }
 reqwest = { workspace = true }
 rocksdb = { workspace = true }
+byteorder = "1.5"
 tracing = { workspace = true }
 
 [dev-dependencies]

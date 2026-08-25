@@ -13,8 +13,10 @@ use uuid::Uuid;
 pub enum IndexError {
     #[error("rocksdb error: {0}")]
     Rocks(#[from] rocksdb::Error),
-    #[error("serde error: {0}")]
-    Serde(#[from] bincode::Error),
+    #[error("encode error: {0}")]
+    Encode(#[from] bincode_next::error::EncodeError),
+    #[error("decode error: {0}")]
+    Decode(#[from] bincode_next::error::DecodeError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("shared index error: {0}")]
@@ -187,7 +189,7 @@ impl MetadataStore {
                             entry,
                         } => rocks_batch.put(
                             Self::dedup_key(&tenant_id, &key),
-                            bincode::serialize(&entry)?,
+                            broker_proto::encode(&entry)?,
                         ),
                         MetadataOperation::DeleteDedup { tenant_id, key } => {
                             rocks_batch.delete(Self::dedup_key(&tenant_id, &key))
@@ -271,7 +273,7 @@ impl MetadataStore {
             MetaBackend::Rocks { db, .. } => {
                 let key = Self::dedup_key(tenant_id, idempotency_key);
                 match db.get(key)? {
-                    Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
+                    Some(bytes) => Ok(Some(broker_proto::decode(&bytes)?)),
                     None => Ok(None),
                 }
             }
@@ -296,7 +298,7 @@ impl MetadataStore {
             }
             MetaBackend::Rocks { db, sync_writes } => {
                 let key = Self::dedup_key(tenant_id, idempotency_key);
-                let value = bincode::serialize(entry)?;
+                let value = broker_proto::encode(entry)?;
                 db.put_opt(key, value, sync_writes)?;
                 Ok(())
             }
