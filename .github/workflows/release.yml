@@ -166,9 +166,14 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin to rust-toolchain.toml (1.89.0). `@stable` installs the target on a
+      # different toolchain, then rustup overrides back to 1.89.0 without it.
+      - uses: dtolnay/rust-toolchain@1.89.0
         with:
           targets: ${{ matrix.target }}
+
+      - name: Add target to the repo-pinned toolchain
+        run: rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
 
