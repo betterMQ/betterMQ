@@ -1,8 +1,11 @@
-# Self-host HA: 3 brokers + shared meta volume (local WAL).
+# Self-host HA: 3 brokers with fixed RF=3 (each shard has 3 replicas).
+# Extra brokers in larger cells host other shard leaders, not extra copies
+# of every message.
 #
 #   cd selfhost && docker compose -f docker-compose.ha.yml up -d --build
 #
 # Panel: http://localhost:8081/panel/  (broker1)
+# Standalone panel: docker compose -f docker-compose.panel.yml up -d
 # Requires BETTERMQ_CLUSTER_SECRET (set below or in .env).
 #
 # After first boot: configure cluster from Panel → Infrastructure on broker1,
@@ -17,11 +20,12 @@ x-broker: &broker
   environment:
     BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:?set BETTERMQ_CLUSTER_SECRET}
     BETTERMQ_SHARED_META_DIR: /cluster-shared/meta
+    BETTERMQ_METRICS_TOKEN: ${BETTERMQ_METRICS_TOKEN:?set BETTERMQ_METRICS_TOKEN}
   volumes:
     - cluster-meta:/cluster-shared/meta
   restart: unless-stopped
   healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+    test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
     interval: 10s
     timeout: 3s
     retries: 5

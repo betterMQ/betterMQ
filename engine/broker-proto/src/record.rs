@@ -7,16 +7,36 @@ use std::io::{self, Read, Write};
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Max bincode header size accepted when decoding a frame.
+pub const MAX_FRAME_HEADER_BYTES: usize = 1024 * 1024;
+/// Default max payload size (aligned with the HTTP body cap).
+pub const DEFAULT_MAX_FRAME_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+pub fn max_frame_payload_bytes() -> usize {
+    std::env::var("BETTERMQ_MAX_HTTP_BODY_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(DEFAULT_MAX_FRAME_PAYLOAD_BYTES)
+}
+
 #[derive(Debug, Error)]
 pub enum RecordError {
     #[error("invalid magic")]
     InvalidMagic,
     #[error("checksum mismatch")]
     ChecksumMismatch,
+    #[error("frame too large: header={header_len} payload={payload_len}")]
+    FrameTooLarge {
+        header_len: usize,
+        payload_len: usize,
+    },
     #[error("io error: {0}")]
     Io(#[from] io::Error),
+    #[error("encode error: {0}")]
+    Encode(#[from] bincode_next::error::EncodeError),
     #[error("decode error: {0}")]
-    Decode(#[from] bincode::Error),
+    Decode(#[from] bincode_next::error::DecodeError),
 }
 
 fn default_priority() -> u8 {
@@ -94,11 +114,11 @@ struct LogRecordLegacy {
 }
 
 impl LogRecord {
-    pub fn decode_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        match bincode::deserialize::<Self>(bytes) {
+    pub fn decode_bytes(bytes: &[u8]) -> Result<Self, bincode_next::error::DecodeError> {
+        match crate::codec::decode::<Self>(bytes) {
             Ok(r) => Ok(r),
             Err(_) => {
-                let leg: LogRecordLegacy = bincode::deserialize(bytes)?;
+                let leg: LogRecordLegacy = crate::codec::decode(bytes)?;
                 Ok(Self {
                     id: leg.id,
                     tenant_id: leg.tenant_id,
@@ -161,13 +181,31 @@ pub struct StoredMessage {
     pub payload_ref_json: Option<String>,
 }
 
+/// Encode a frame into a new buffer (replication / batch append).
+pub fn encode_frame_vec(header: &LogRecord, payload: &[u8]) -> Result<Vec<u8>, RecordError> {
+    let mut buf = Vec::new();
+    encode_frame(header, payload, &mut buf)?;
+    Ok(buf)
+}
+
+/// CRC32 of concatenated frames (commit-epoch / replication batch).
+pub fn batch_crc(frames: &[u8]) -> u32 {
+    crc32fast::hash(frames)
+}
+
 /// On-disk frame: magic | header_len | payload_len | header | payload | crc32
 pub fn encode_frame(
     header: &LogRecord,
     payload: &[u8],
     writer: &mut impl Write,
 ) -> Result<(), RecordError> {
-    let header_bytes = bincode::serialize(header)?;
+    let header_bytes = crate::codec::encode(header)?;
+    if header_bytes.len() > MAX_FRAME_HEADER_BYTES || payload.len() > max_frame_payload_bytes() {
+        return Err(RecordError::FrameTooLarge {
+            header_len: header_bytes.len(),
+            payload_len: payload.len(),
+        });
+    }
     let mut body = Vec::with_capacity(12 + header_bytes.len() + payload.len());
     body.extend_from_slice(&RECORD_MAGIC);
     body.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
@@ -192,6 +230,12 @@ pub fn decode_frame(mut reader: impl Read) -> Result<(LogRecord, Vec<u8>), Recor
     let header_len = u32::from_be_bytes(len_buf) as usize;
     reader.read_exact(&mut len_buf)?;
     let payload_len = u32::from_be_bytes(len_buf) as usize;
+    if header_len > MAX_FRAME_HEADER_BYTES || payload_len > max_frame_payload_bytes() {
+        return Err(RecordError::FrameTooLarge {
+            header_len,
+            payload_len,
+        });
+    }
 
     let mut header_bytes = vec![0u8; header_len];
     reader.read_exact(&mut header_bytes)?;
@@ -253,5 +297,15 @@ mod tests {
         let (h, p) = decode_frame(std::io::Cursor::new(buf)).unwrap();
         assert_eq!(h, header);
         assert_eq!(p, payload);
+    }
+
+    #[test]
+    fn decode_rejects_oversize_lengths() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&RECORD_MAGIC);
+        buf.extend_from_slice(&u32::MAX.to_be_bytes());
+        buf.extend_from_slice(&u32::MAX.to_be_bytes());
+        let err = decode_frame(std::io::Cursor::new(buf)).unwrap_err();
+        assert!(matches!(err, RecordError::FrameTooLarge { .. }));
     }
 }

@@ -27,11 +27,28 @@ pub fn ingest_meter(auth: Option<IngestAuth>, body_bytes: usize) -> Option<Inges
 }
 
 /// Record accepted ingest after a non-duplicate publish (best-effort).
+/// Cloud: buffer in memory and flush asynchronously so Postgres is not on the ACK path.
 pub async fn record_ingest(state: &Arc<AppState>, tenant_id: Uuid, body_bytes: u64) {
     #[cfg(feature = "cloud")]
     {
+        use parking_lot::Mutex;
+        use std::collections::HashMap;
+        use std::sync::OnceLock;
+        struct Buf(HashMap<Uuid, (u64, u64)>);
+        static BUF: OnceLock<Mutex<Buf>> = OnceLock::new();
+        let buf = BUF.get_or_init(|| Mutex::new(Buf(HashMap::new())));
+        {
+            let mut g = buf.lock();
+            let e = g.0.entry(tenant_id).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += body_bytes;
+        }
         let Some(cp) = state.control_plane.as_ref() else {
             return;
+        };
+        let drain: Vec<(Uuid, u64, u64)> = {
+            let mut g = buf.lock();
+            g.0.drain().map(|(k, (m, b))| (k, m, b)).collect()
         };
         let now = Utc::now();
         let hour = now
@@ -39,13 +56,19 @@ pub async fn record_ingest(state: &Arc<AppState>, tenant_id: Uuid, body_bytes: u
             .and_then(|t| t.with_second(0))
             .and_then(|t| t.with_nanosecond(0))
             .unwrap_or(now);
-        let delta = broker_control_plane::UsageCounters {
-            messages_accepted: 1,
-            bytes_ingested: body_bytes as i64,
-            ..Default::default()
-        };
-        if let Err(e) = broker_control_plane::record_usage(cp, tenant_id, hour, &delta).await {
-            tracing::warn!(error = %e, %tenant_id, "record_usage failed");
+        for (tid, messages, bytes) in drain {
+            let delta = broker_control_plane::UsageCounters {
+                messages_accepted: messages as i64,
+                bytes_ingested: bytes as i64,
+                ..Default::default()
+            };
+            if let Err(e) = broker_control_plane::record_usage(cp, tid, hour, &delta).await {
+                tracing::warn!(error = %e, %tid, "record_usage failed");
+                let mut g = buf.lock();
+                let e = g.0.entry(tid).or_insert((0, 0));
+                e.0 += messages;
+                e.1 += bytes;
+            }
         }
     }
     #[cfg(not(feature = "cloud"))]

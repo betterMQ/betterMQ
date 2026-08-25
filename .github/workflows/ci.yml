@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
 
@@ -31,6 +31,11 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
       - name: build broker-server
         run: cargo build -p broker-server --release
 
@@ -42,21 +47,43 @@ jobs:
         working-directory: selfhost
         run: |
           docker compose -f docker-compose.yml config >/dev/null
-          docker compose -f docker-compose.slate.yml config >/dev/null
-          BETTERMQ_CLUSTER_SECRET=ci-secret docker compose -f docker-compose.ha.yml config >/dev/null
-          BETTERMQ_CLUSTER_SECRET=ci-secret docker compose -f docker-compose.ha-slate.yml config >/dev/null
-          BETTERMQ_CLUSTER_SECRET=ci-secret docker compose -f docker-compose.ha-fleet.yml config >/dev/null
-          BETTERMQ_CLUSTER_SECRET=ci-secret docker compose -f docker-compose.ha-slate-fleet.yml config >/dev/null
+          MINIO_ROOT_USER=ci MINIO_ROOT_PASSWORD=ci-secret-not-default docker compose -f docker-compose.slate.yml config >/dev/null
+          BETTERMQ_CLUSTER_SECRET=ci-secret BETTERMQ_METRICS_TOKEN=ci-metrics docker compose -f docker-compose.ha.yml config >/dev/null
+          BETTERMQ_CLUSTER_SECRET=ci-secret BETTERMQ_METRICS_TOKEN=ci-metrics MINIO_ROOT_USER=ci MINIO_ROOT_PASSWORD=ci-secret-not-default docker compose -f docker-compose.ha-slate.yml config >/dev/null
+          BETTERMQ_CLUSTER_SECRET=ci-secret BETTERMQ_METRICS_TOKEN=ci-metrics docker compose -f docker-compose.ha-fleet.yml config >/dev/null
+          BETTERMQ_CLUSTER_SECRET=ci-secret BETTERMQ_METRICS_TOKEN=ci-metrics MINIO_ROOT_USER=ci MINIO_ROOT_PASSWORD=ci-secret-not-default docker compose -f docker-compose.ha-slate-fleet.yml config >/dev/null
 
   release-gates:
     runs-on: ubuntu-latest
     needs: [rust, selfhost-compose-validate]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - name: SSRF + lease unit gates
         run: |
           cargo test -p broker-dispatch egress -- --nocapture
           cargo test -p broker-dispatch lease -- --nocapture
           cargo test -p broker-dispatch host_blocker -- --nocapture
+          cargo test -p broker-dispatch completion_race -- --nocapture
+          cargo test -p broker-storage group_commit -- --nocapture
+          cargo test -p broker-raft-meta epoch -- --nocapture
+
+      - name: durable WAL fsync truth gate
+        run: cargo test -p broker-storage --test durable_wal_truth_gate -- --nocapture
+
+      - name: ingest microbenches (smoke)
+        run: cargo bench -p broker-proto --bench encode -- --sample-size 10
+
+  perf-gate:
+    runs-on: ubuntu-latest
+    needs: [rust]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: document launch gate
+        run: |
+          echo "Launch gate (dedicated 3-broker NVMe cell): >=100k durable msg/s, p50<=5ms p99<=20ms."
+          echo "CI records a correctness+compile gate; do not market Kafka-like numbers from this job."
+          cargo test -p broker-partition independent_shards -- --nocapture

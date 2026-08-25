@@ -17,8 +17,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
     # Internal compose network only — do not publish 9000/9001 on untrusted hosts.
     expose:
       - "9000"
@@ -31,8 +31,8 @@ services:
     depends_on:
       - minio
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
     entrypoint: >
       /bin/sh -c "
         until mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" 2>/dev/null; do sleep 1; done;
@@ -50,8 +50,6 @@ services:
       - "8080:8080"
     environment:
       BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:-}
-      # Optional: require header x-bettermq-setup-token on first panel setup
-      # BETTERMQ_SETUP_TOKEN: ${BETTERMQ_SETUP_TOKEN:-}
     volumes:
       - bettermq-data:/data
     command: ["serve", "--data-dir", "/data"]
@@ -60,7 +58,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
       interval: 10s
       timeout: 3s
       retries: 5

@@ -1,5 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use broker_proto::{join_under_root, sanitize_path_segment, stable_partition};
 use std::path::{Path, PathBuf};
 
 /// Internal topic for one-off `POST /v1/publish` jobs (URL on the message, not a named queue).
@@ -30,19 +29,21 @@ pub fn is_dlq_topic(topic: &str) -> bool {
 }
 
 pub fn partition_for(tenant_id: &str, topic: &str, routing_key: &str, partitions: u32) -> u32 {
-    let mut hasher = DefaultHasher::new();
-    tenant_id.hash(&mut hasher);
-    topic.hash(&mut hasher);
-    routing_key.hash(&mut hasher);
-    (hasher.finish() % partitions as u64) as u32
+    stable_partition(tenant_id, topic, routing_key, partitions)
 }
 
-pub fn partition_dir(data_dir: &Path, tenant_id: &str, topic: &str, partition: u32) -> PathBuf {
-    data_dir
-        .join("partitions")
-        .join(tenant_id)
-        .join(topic)
-        .join(format!("p{partition}"))
+pub fn partition_dir(
+    data_dir: &Path,
+    tenant_id: &str,
+    topic: &str,
+    partition: u32,
+) -> Result<PathBuf, broker_proto::PathSegmentError> {
+    let tenant = sanitize_path_segment(tenant_id)?;
+    let topic = sanitize_path_segment(topic)?;
+    join_under_root(
+        data_dir,
+        &["partitions", tenant, topic, &format!("p{partition}")],
+    )
 }
 
 #[cfg(test)]
@@ -55,5 +56,14 @@ mod tests {
         let p2 = partition_for("t", "orders", "a", 4);
         assert_eq!(p1, p2);
         assert!(p1 < 4);
+    }
+
+    #[test]
+    fn partition_dir_rejects_traversal() {
+        let root = Path::new("/data");
+        assert!(partition_dir(root, "default", "../etc", 0).is_err());
+        assert!(partition_dir(root, "..", "orders", 0).is_err());
+        let ok = partition_dir(root, "default", "jobs.__dlq", 0).unwrap();
+        assert!(ok.starts_with(root));
     }
 }

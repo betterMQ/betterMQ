@@ -2,7 +2,7 @@
 
 use crate::routes::ApiError;
 use crate::AppState;
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use broker_dispatch::sample_process_resources;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,10 @@ pub struct MetricsResponse {
     pub memory_critical: bool,
     pub cluster_enabled: bool,
     pub healthy_peers: usize,
+    pub ingest_accepted: u64,
+    pub ingest_duplicate: u64,
+    pub ingest_rejected: u64,
+    pub durable_commits: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rss_mb: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,8 +60,19 @@ pub struct BlockHostRequest {
 }
 
 pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadyResponse>) {
-    let auth_configured =
-        state.local_auth.as_ref().is_some_and(|a| a.is_configured()) || state.uses_cloud_auth();
+    let body = ready_snapshot(&state);
+    let status = if body.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body))
+}
+
+pub fn ready_snapshot(state: &AppState) -> ReadyResponse {
+    let auth_configured = crate::auth::insecure_no_auth()
+        || state.local_auth.as_ref().is_some_and(|a| a.is_configured())
+        || state.uses_cloud_auth();
     let cluster_healthy = match &state.cluster {
         None => true,
         Some(c) => {
@@ -71,20 +86,11 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Rea
             alive >= cfg.quorum_size()
         }
     };
-    let ready = auth_configured && cluster_healthy;
-    let status = if ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (
-        status,
-        Json(ReadyResponse {
-            ready,
-            cluster_healthy,
-            auth_configured,
-        }),
-    )
+    ReadyResponse {
+        ready: auth_configured && cluster_healthy,
+        cluster_healthy,
+        auth_configured,
+    }
 }
 
 pub async fn metrics(
@@ -96,16 +102,20 @@ pub async fn metrics(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
-        let ok = headers
+        let presented = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
-            .is_some_and(|got| got == expected)
-            || headers
-                .get("x-bettermq-metrics-token")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|got| got == expected);
-        if !ok {
+            .or_else(|| {
+                headers
+                    .get("x-bettermq-metrics-token")
+                    .and_then(|v| v.to_str().ok())
+            })
+            .unwrap_or("");
+        use subtle::ConstantTimeEq;
+        let a = presented.as_bytes();
+        let b = expected.as_bytes();
+        if a.len() != b.len() || !bool::from(a.ct_eq(b)) {
             return Err(StatusCode::UNAUTHORIZED);
         }
     }
@@ -131,16 +141,124 @@ pub async fn metrics(
         (Some(rss), Some(limit)) if limit > 0 => Some(((rss * 100) / limit).min(100) as u8),
         _ => None,
     };
-    Ok(Json(MetricsResponse {
-        blocked_hosts: blocked.len(),
-        memory_critical: guard.is_critical(),
+    let ingest = crate::metrics::snapshot();
+    Ok(Json(metrics_snapshot_from(
+        blocked.len(),
+        guard.is_critical(),
         cluster_enabled,
         healthy_peers,
-        rss_mb: resources.rss_mb,
+        ingest,
+        resources.rss_mb,
         memory_limit_mb,
         memory_percent,
-        cpu_percent: resources.cpu_percent,
-    }))
+        resources.cpu_percent,
+    )))
+}
+
+pub fn metrics_snapshot(state: &AppState) -> MetricsResponse {
+    let blocked = state.dispatch.host_blocker().blocked_hosts();
+    let cluster_enabled = state.cluster.is_some();
+    let healthy_peers = state
+        .cluster
+        .as_ref()
+        .map(|c| {
+            let now = Utc::now().timestamp_millis();
+            c.runtime
+                .config()
+                .nodes
+                .iter()
+                .filter(|n| c.runtime.is_peer_alive(n.id, now))
+                .count()
+        })
+        .unwrap_or(1);
+    let guard = state.dispatch.memory_guard();
+    let resources = sample_process_resources();
+    let memory_limit_mb = guard.limit_mb();
+    let memory_percent = match (resources.rss_mb, memory_limit_mb) {
+        (Some(rss), Some(limit)) if limit > 0 => Some(((rss * 100) / limit).min(100) as u8),
+        _ => None,
+    };
+    let ingest = crate::metrics::snapshot();
+    metrics_snapshot_from(
+        blocked.len(),
+        guard.is_critical(),
+        cluster_enabled,
+        healthy_peers,
+        ingest,
+        resources.rss_mb,
+        memory_limit_mb,
+        memory_percent,
+        resources.cpu_percent,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn metrics_snapshot_from(
+    blocked_hosts: usize,
+    memory_critical: bool,
+    cluster_enabled: bool,
+    healthy_peers: usize,
+    ingest: crate::metrics::IngestSnapshot,
+    rss_mb: Option<u64>,
+    memory_limit_mb: Option<u64>,
+    memory_percent: Option<u8>,
+    cpu_percent: Option<f32>,
+) -> MetricsResponse {
+    MetricsResponse {
+        blocked_hosts,
+        memory_critical,
+        cluster_enabled,
+        healthy_peers,
+        ingest_accepted: ingest.accepted,
+        ingest_duplicate: ingest.duplicate,
+        ingest_rejected: ingest.rejected,
+        durable_commits: ingest.durable_commits,
+        rss_mb,
+        memory_limit_mb,
+        memory_percent,
+        cpu_percent,
+    }
+}
+
+fn metrics_authorized(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+    if let Some(expected) = std::env::var("BETTERMQ_METRICS_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        let presented = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .or_else(|| {
+                headers
+                    .get("x-bettermq-metrics-token")
+                    .and_then(|v| v.to_str().ok())
+            })
+            .unwrap_or("");
+        use subtle::ConstantTimeEq;
+        let a = presented.as_bytes();
+        let b = expected.as_bytes();
+        if a.len() != b.len() || !bool::from(a.ct_eq(b)) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok(())
+}
+
+pub async fn metrics_prometheus(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, StatusCode> {
+    metrics_authorized(&headers)?;
+    let native = crate::metrics::native_snapshot(&state);
+    let body = crate::metrics::prometheus_text_with_native(&native);
+    Ok((
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4")],
+        body,
+    )
+        .into_response())
 }
 
 pub async fn list_blocked_hosts(State(state): State<Arc<AppState>>) -> Json<BlockedHostsResponse> {

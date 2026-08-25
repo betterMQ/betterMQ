@@ -15,11 +15,12 @@ x-broker: &broker
   environment:
     BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:?set BETTERMQ_CLUSTER_SECRET}
     BETTERMQ_SHARED_META_DIR: /cluster-shared/meta
+    BETTERMQ_METRICS_TOKEN: ${BETTERMQ_METRICS_TOKEN:?set BETTERMQ_METRICS_TOKEN}
   volumes:
     - cluster-meta:/cluster-shared/meta
   restart: unless-stopped
   healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+    test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
     interval: 10s
     timeout: 3s
     retries: 5

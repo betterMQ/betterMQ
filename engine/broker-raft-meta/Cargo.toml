@@ -3,7 +3,7 @@ name = "broker-raft-meta"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Cluster metadata and shard leadership (CP7a)"
+description = "Durable OpenRaft controller and compatibility facade"
 
 [dependencies]
 broker-proto = { workspace = true }
@@ -13,7 +13,14 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
-fs2 = "0.4"
+broker-storage = { path = "../broker-storage" }
+openraft = { version = "0.9.25", features = ["serde"] }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+rocksdb = { workspace = true }
+byteorder = "1.5"
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+axum = { workspace = true }

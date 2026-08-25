@@ -24,7 +24,7 @@
     },
     {
       "name": "Queues",
-      "description": "Named destinations"
+      "description": "Named destinations — webhook, retries, and parallelism"
     },
     {
       "name": "Groups",
@@ -32,7 +32,7 @@
     },
     {
       "name": "Enqueue",
-      "description": "Queue jobs"
+      "description": "Jobs on a queue. Omit key for standard; set key for FIFO per entity"
     },
     {
       "name": "Flows",
@@ -222,6 +222,7 @@
         "required": [
           "body"
         ],
+        "description": "Enqueue a job. Omit `key` for standard delivery (queue parallelism). Set `key` for FIFO per entity. Retries default from the queue.",
         "properties": {
           "queue_id": {
             "type": "string",
@@ -231,22 +232,12 @@
             "type": "string"
           },
           "key": {
-            "type": "string"
+            "type": "string",
+            "description": "Optional FIFO lane. Empty/omit = standard. Same key is ordered; different keys run in parallel."
           },
           "body": {},
           "priority": {
             "type": "integer"
-          },
-          "flow_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "flow": {
-            "$ref": "#/components/schemas/FlowControlBody"
-          },
-          "flowControl": {
-            "$ref": "#/components/schemas/FlowControlBody",
-            "description": "Alias for flow"
           },
           "delay": {
             "type": "integer"
@@ -826,6 +817,7 @@
           "url",
           "secret"
         ],
+        "description": "Named destination. Retries and parallelism apply to new enqueues. Changing the URL does not affect in-flight jobs.",
         "properties": {
           "queue": {
             "type": "string"
@@ -836,6 +828,11 @@
           },
           "secret": {
             "type": "string"
+          },
+          "parallelism": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Max in-flight for jobs without a key. 1 = serial queue. Omit or 0 = unconstrained (standard)."
           },
           "max_retries": {
             "type": "integer",
@@ -860,6 +857,13 @@
           },
           "url": {
             "type": "string"
+          },
+          "parallelism": {
+            "type": "integer",
+            "description": "Max in-flight for jobs without a key. Omitted = unconstrained."
+          },
+          "max_retries": {
+            "type": "integer"
           }
         }
       },
@@ -1007,7 +1011,7 @@
       },
       "FlowControlBody": {
         "type": "object",
-        "description": "Inline flow control on publish/enqueue. Reuses an existing profile when key + limits match; otherwise creates or updates. Also accepted as `flow`.",
+        "description": "Inline flow control on publish. Reuses an existing profile when key + limits match; otherwise creates or updates. Also accepted as `flow`. Queue jobs do not use this — set a message `key` for FIFO or queue `parallelism` for standard.",
         "properties": {
           "key": {
             "type": "string",
@@ -1153,7 +1157,7 @@
         "properties": {
           "cron": {
             "type": "string",
-            "description": "5-field cron (UTC)"
+            "description": "5- or 6-field cron. UTC by default. Prefix with CRON_TZ=<IANA> for a local timezone, e.g. CRON_TZ=America/New_York */5 * * * *."
           },
           "every_seconds": {
             "type": "integer"
@@ -1166,7 +1170,8 @@
             "format": "uuid"
           },
           "key": {
-            "type": "string"
+            "type": "string",
+            "description": "When targeting a queue: FIFO lane. Omit for standard."
           },
           "body": {},
           "priority": {
@@ -1540,6 +1545,15 @@
           },
           "configured": {
             "type": "boolean"
+          },
+          "setup_open": {
+            "type": "boolean",
+            "description": "First-boot password can be set during the setup window"
+          },
+          "setup_closes_in_secs": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Seconds left on the first-boot window"
           }
         }
       },
@@ -1562,10 +1576,6 @@
         "properties": {
           "password": {
             "type": "string"
-          },
-          "setup_token": {
-            "type": "string",
-            "description": "Optional when BETTERMQ_SETUP_TOKEN is set; prefer header x-bettermq-setup-token"
           }
         }
       },
@@ -2243,6 +2253,23 @@
         }
       }
     },
+    "/v1/ops/aggregate": {
+      "get": {
+        "tags": ["Ops"],
+        "operationId": "aggregateOpsStatus",
+        "summary": "Aggregate DLQ/delayed/metrics/fleet across local + peer brokers",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/metrics": {
       "get": {
         "tags": [
@@ -2433,6 +2460,7 @@
         ],
         "operationId": "enqueue",
         "summary": "Enqueue by queue name or id",
+        "description": "Omit `key` for standard delivery (uses the queue's parallelism). Set `key` for FIFO per entity.",
         "requestBody": {
           "required": true,
           "content": {
@@ -2474,6 +2502,7 @@
         ],
         "operationId": "enqueueToQueue",
         "summary": "Enqueue to queue by ID",
+        "description": "Omit `key` for standard delivery (uses the queue's parallelism). Set `key` for FIFO per entity.",
         "parameters": [
           {
             "name": "queue_id",
@@ -2553,6 +2582,7 @@
         ],
         "operationId": "createQueue",
         "summary": "Create or update queue",
+        "description": "Upsert by queue name. Sets destination URL, retries, and parallelism for new jobs.",
         "requestBody": {
           "required": true,
           "content": {
@@ -2652,6 +2682,22 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FlowProfileResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A flow with the same key, parallelism, rate, and period already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "duplicate flow 5c689142-fdf3-4f24-8e5f-c413fccd8d8d"
+                    }
+                  }
                 }
               }
             }
@@ -3439,7 +3485,7 @@
           "DLQ"
         ],
         "operationId": "deleteDlqMessage",
-        "summary": "Purge a single DLQ message",
+        "summary": "Purge one DLQ message, or every message on the topic if partition and offset are omitted",
         "parameters": [
           {
             "name": "dlq_topic",
@@ -3453,25 +3499,42 @@
           {
             "name": "partition",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "integer",
               "format": "uint32"
-            }
+            },
+            "description": "Required with offset to delete one message. Omit both to delete every message on dlq_topic."
           },
           {
             "name": "offset",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "integer",
               "format": "uint64"
-            }
+            },
+            "description": "Required with partition to delete one message. Omit both to delete every message on dlq_topic."
           }
         ],
         "responses": {
+          "200": {
+            "description": "Deleted every message on the DLQ topic",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
           "204": {
-            "description": "Deleted"
+            "description": "Deleted one message"
           },
           "400": {
             "description": "Invalid topic or message not found"
@@ -3527,6 +3590,116 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BatchEnqueueResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ingest/batch": {
+      "post": {
+        "tags": [
+          "Enqueue"
+        ],
+        "operationId": "highThroughputBatchIngest",
+        "summary": "High-throughput JSON batch ingest (max 1000 messages / 8 MiB payload data)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchEnqueueRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchEnqueueResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Tenant admission queue is saturated",
+            "headers": {
+              "Retry-After": {
+                "description": "Minimum retry delay in whole seconds",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Broker admission queue or memory is saturated",
+            "headers": {
+              "Retry-After": {
+                "description": "Minimum retry delay in whole seconds",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ingest/ndjson": {
+      "post": {
+        "tags": [
+          "Enqueue"
+        ],
+        "operationId": "ndjsonBatchIngest",
+        "summary": "High-throughput newline-delimited JSON ingest (max 1000 messages / 8 MiB)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-ndjson": {
+              "schema": {
+                "type": "string",
+                "description": "One PublishRequest JSON object per non-empty line"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchEnqueueResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed line or batch limit exceeded"
+          },
+          "429": {
+            "description": "Tenant admission queue is saturated",
+            "headers": {
+              "Retry-After": {
+                "description": "Minimum retry delay in whole seconds",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Broker admission queue or memory is saturated",
+            "headers": {
+              "Retry-After": {
+                "description": "Minimum retry delay in whole seconds",
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -4038,16 +4211,6 @@
         "operationId": "localAuthSetup",
         "summary": "First-time local auth setup — returns API token once",
         "security": [],
-        "parameters": [
-          {
-            "name": "x-bettermq-setup-token",
-            "in": "header",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Required when BETTERMQ_SETUP_TOKEN is set"
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {

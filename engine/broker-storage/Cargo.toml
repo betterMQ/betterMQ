@@ -7,11 +7,12 @@ description = "WAL, segments, and RocksDB indexes"
 
 [features]
 default = []
-slate = ["dep:slatedb", "dep:object_store", "dep:tokio", "dep:bytes"]
+s3 = ["dep:object_store", "dep:tokio", "dep:bytes", "dep:futures"]
+slate = ["s3", "dep:slatedb"]
 
 [dependencies]
 broker-proto = { workspace = true }
-bincode = { workspace = true }
+bincode-next = { workspace = true }
 rocksdb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,9 +21,22 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 bytes = { version = "1", optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread"] }
+futures = { version = "0.3", optional = true }
 slatedb = { version = "0.13", optional = true }
 object_store = { version = "0.12", optional = true, features = ["aws"] }
 fs2 = "0.4"
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+criterion = "0.5"
+fjall = "2.11.2"
+
+[[bench]]
+name = "wal"
+harness = false
+
+[[bench]]
+name = "state_index"
+harness = false

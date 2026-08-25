@@ -4,18 +4,37 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Restrict a file that may contain secrets (tokens, webhook URLs, hashes).
+pub fn set_secret_file_mode(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    let _ = path;
+}
+
 /// Atomic durable write: temp → fsync → rename → parent-dir fsync.
 pub fn atomic_write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    atomic_write_file_with(path, bytes, true)
+}
+
+/// Atomic replace. When `fsync` is false, skip `sync_all` (OS page cache only).
+pub fn atomic_write_file_with(path: &Path, bytes: &[u8], fsync: bool) -> std::io::Result<()> {
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     {
         let mut f = File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        if fsync {
+            f.sync_all()?;
+        }
     }
     std::fs::rename(&tmp, path)?;
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
+    if fsync {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
         }
     }
     Ok(())
@@ -28,6 +47,12 @@ pub struct LogMeta {
     /// Offsets tombstoned by purge (local log bytes are not rewritten).
     #[serde(default)]
     pub purged_offsets: BTreeSet<u64>,
+    /// Last accepted leadership fence for this partition (local WAL).
+    #[serde(default)]
+    pub leader_generation: u64,
+    /// Highest offset whose sealed segments may be physically deleted.
+    #[serde(default)]
+    pub gc_watermark: u64,
 }
 
 impl LogMeta {
@@ -46,9 +71,13 @@ impl LogMeta {
     }
 
     pub fn save(&self, partition_dir: &Path) -> std::io::Result<()> {
+        self.save_with(partition_dir, true)
+    }
+
+    pub fn save_with(&self, partition_dir: &Path, fsync: bool) -> std::io::Result<()> {
         let path = Self::path(partition_dir);
         let bytes = serde_json::to_vec(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        atomic_write_file(&path, &bytes)
+        atomic_write_file_with(&path, &bytes, fsync)
     }
 }

@@ -1,3 +1,4 @@
+use broker_proto::{join_under_root, sanitize_path_segment};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -12,7 +13,19 @@ pub struct PayloadRef {
 }
 
 impl PayloadRef {
-    pub fn key_for(tenant_id: &str, message_id: Uuid) -> String {
-        format!("payloads/{tenant_id}/{message_id}")
+    pub fn key_for(
+        tenant_id: &str,
+        message_id: Uuid,
+    ) -> Result<String, broker_proto::PathSegmentError> {
+        let tenant = sanitize_path_segment(tenant_id)?;
+        Ok(format!("payloads/{tenant}/{message_id}"))
+    }
+
+    pub fn fs_path(
+        root: &std::path::Path,
+        bucket_key: &str,
+    ) -> Result<std::path::PathBuf, broker_proto::PathSegmentError> {
+        let parts: Vec<&str> = bucket_key.split('/').collect();
+        join_under_root(root, &parts)
     }
 }

@@ -37,6 +37,9 @@ pub struct ClaimedJob {
     pub message_id: Uuid,
     pub expires_at_ms: i64,
     pub generation: u64,
+    /// Broker-verified committed high watermark at claim time.
+    #[serde(default)]
+    pub committed_hwm: u64,
     /// Cursor key used by dispatch (lane owner UUID string, else topic).
     pub cursor_key: String,
     /// Delivery envelope — present on claim so fleet can push without a second fetch.
@@ -79,16 +82,31 @@ pub struct HeartbeatRequest {
 pub struct CompleteRequest {
     pub lease_id: Uuid,
     pub holder: String,
+    pub generation: u64,
+    pub topic: String,
+    pub partition: u32,
+    pub offset: u64,
+    pub message_id: Uuid,
+    pub cursor_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailRequest {
     pub lease_id: Uuid,
     pub holder: String,
+    pub generation: u64,
+    pub topic: String,
+    pub partition: u32,
+    pub offset: u64,
+    pub message_id: Uuid,
+    pub cursor_key: String,
     pub reason: String,
     /// When true, move to DLQ instead of retry delay.
     #[serde(default)]
     pub dead_letter: bool,
+    /// For retryable failures, keep the offset unavailable until this delay.
+    #[serde(default)]
+    pub retry_after_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -126,10 +144,21 @@ impl LeaseTable {
     }
 
     pub fn insert(&self, holder: String, job: ClaimedJob) {
+        let _ = self.try_insert(holder, job);
+    }
+
+    /// Atomically claim an offset. Returns false if another holder already leased it.
+    pub fn try_insert(&self, holder: String, job: ClaimedJob) -> bool {
         let id = job.lease_id;
         let key = (job.topic.clone(), job.partition, job.offset);
-        self.leased_offsets.lock().insert(key, id);
-        self.inner.lock().insert(id, LeaseEntry { job, holder });
+        let mut inner = self.inner.lock();
+        let mut offsets = self.leased_offsets.lock();
+        if offsets.contains_key(&key) {
+            return false;
+        }
+        offsets.insert(key, id);
+        inner.insert(id, LeaseEntry { job, holder });
+        true
     }
 
     pub fn heartbeat(
@@ -209,11 +238,7 @@ impl LeaseTable {
 }
 
 fn cursor_key_for(msg: &StoredMessage) -> String {
-    msg.group_member_id
-        .or(msg.queue_id)
-        .or(msg.flow_profile_id)
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| msg.topic.clone())
+    broker_partition::flow_lane_owner(msg).to_string()
 }
 
 /// Shared claim selection used by HTTP lease API and in-process dispatch.
@@ -270,46 +295,61 @@ pub fn claim_from_broker(
                 continue;
             }
             let tenant = broker.tenant();
-            // Prefer queue/lane cursor when we can peek the first message; fall back to topic.
-            let peek = broker
-                .list_topic_messages_from(&topic, partition, 0, 1)
-                .ok()
-                .and_then(|m| m.into_iter().next());
-            let cursor_key = peek
-                .as_ref()
-                .map(cursor_key_for)
-                .unwrap_or_else(|| topic.clone());
-            let cursor = broker
-                .dispatch_offset(&tenant, &cursor_key, partition)
-                .unwrap_or(0);
-            let Ok(batch) = broker.list_topic_messages_from(&topic, partition, cursor, 32) else {
+            let Ok(committed_hwm) = broker.committed_hwm(&topic, partition) else {
                 continue;
             };
-            for msg in batch {
-                if jobs.len() >= max {
-                    break 'outer;
-                }
-                if leases.is_offset_leased(&topic, partition, msg.offset) {
-                    continue;
-                }
-                if msg.offset < cursor {
-                    continue;
-                }
-                let ck = cursor_key_for(&msg);
-                let lease_id = Uuid::new_v4();
-                let claimed = ClaimedJob {
-                    lease_id,
-                    topic: topic.clone(),
-                    partition,
-                    offset: msg.offset,
-                    message_id: msg.id,
-                    expires_at_ms: now + ttl,
-                    generation: generation(partition),
-                    cursor_key: ck,
-                    message: Some(msg),
+            let mut from_offset = 0u64;
+            const PAGE: usize = 256;
+            while from_offset < committed_hwm {
+                let Ok(batch) =
+                    broker.list_topic_messages_from(&topic, partition, from_offset, PAGE)
+                else {
+                    break;
                 };
-                leases.insert(holder.to_string(), claimed.clone());
-                jobs.push(claimed);
+                if batch.is_empty() {
+                    break;
+                }
+                let batch_len = batch.len();
+                let mut advanced = false;
+                for msg in batch {
+                    from_offset = from_offset.max(msg.offset.saturating_add(1));
+                    advanced = true;
+                    if jobs.len() >= max {
+                        break 'outer;
+                    }
+                    if msg.offset >= committed_hwm {
+                        break;
+                    }
+                    let ck = cursor_key_for(&msg);
+                    let cursor = broker.dispatch_offset(&tenant, &ck, partition).unwrap_or(0);
+                    if msg.offset < cursor
+                        || broker
+                            .is_dispatch_complete(&tenant, &ck, partition, msg.offset)
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let lease_id = Uuid::new_v4();
+                    let claimed = ClaimedJob {
+                        lease_id,
+                        topic: topic.clone(),
+                        partition,
+                        offset: msg.offset,
+                        message_id: msg.id,
+                        expires_at_ms: now + ttl,
+                        generation: generation(partition),
+                        committed_hwm,
+                        cursor_key: ck,
+                        message: Some(msg),
+                    };
+                    if !leases.try_insert(holder.to_string(), claimed.clone()) {
+                        continue;
+                    }
+                    jobs.push(claimed);
+                }
+                if !advanced || batch_len < PAGE {
+                    break;
+                }
             }
         }
     }
@@ -418,11 +458,17 @@ impl LeaseClient {
         Ok(())
     }
 
-    pub async fn complete(&self, broker: &str, lease_id: Uuid) -> Result<(), String> {
+    pub async fn complete(&self, broker: &str, job: &ClaimedJob) -> Result<(), String> {
         let url = format!("{broker}/internal/v1/lease/complete");
         let body = CompleteRequest {
-            lease_id,
+            lease_id: job.lease_id,
             holder: self.holder.clone(),
+            generation: job.generation,
+            topic: job.topic.clone(),
+            partition: job.partition,
+            offset: job.offset,
+            message_id: job.message_id,
+            cursor_key: job.cursor_key.clone(),
         };
         let resp = self
             .with_secret(self.http.post(&url).json(&body))
@@ -438,16 +484,24 @@ impl LeaseClient {
     pub async fn fail(
         &self,
         broker: &str,
-        lease_id: Uuid,
+        job: &ClaimedJob,
         reason: &str,
         dead_letter: bool,
+        retry_after_ms: u64,
     ) -> Result<(), String> {
         let url = format!("{broker}/internal/v1/lease/fail");
         let body = FailRequest {
-            lease_id,
+            lease_id: job.lease_id,
             holder: self.holder.clone(),
+            generation: job.generation,
+            topic: job.topic.clone(),
+            partition: job.partition,
+            offset: job.offset,
+            message_id: job.message_id,
+            cursor_key: job.cursor_key.clone(),
             reason: reason.to_string(),
             dead_letter,
+            retry_after_ms,
         };
         let resp = self
             .with_secret(self.http.post(&url).json(&body))
@@ -485,6 +539,7 @@ pub fn long_wait_tier_secs() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use broker_partition::{BrokerConfig, FlowSpec, PublishRequest};
 
     #[test]
     fn lease_insert_heartbeat_take() {
@@ -498,11 +553,25 @@ mod tests {
             message_id: Uuid::new_v4(),
             expires_at_ms: Utc::now().timestamp_millis() + 60_000,
             generation: 1,
+            committed_hwm: 2,
             cursor_key: "t".into(),
             message: None,
         };
         table.insert("w1".into(), job);
         assert!(table.is_offset_leased("t", 0, 1));
+        let dup = ClaimedJob {
+            lease_id: Uuid::new_v4(),
+            topic: "t".into(),
+            partition: 0,
+            offset: 1,
+            message_id: Uuid::new_v4(),
+            expires_at_ms: Utc::now().timestamp_millis() + 60_000,
+            generation: 1,
+            committed_hwm: 2,
+            cursor_key: "t".into(),
+            message: None,
+        };
+        assert!(!table.try_insert("w2".into(), dup));
         assert!(table.heartbeat(id, "w1", 30_000).is_ok());
         assert!(table.heartbeat(id, "other", 30_000).is_err());
         assert!(table.take(id, "w1").is_ok());
@@ -514,5 +583,95 @@ mod tests {
         std::env::set_var("BETTERMQ_LONG_WAIT_TIER", "1h");
         assert_eq!(long_wait_tier_secs(), Some(3600));
         std::env::remove_var("BETTERMQ_LONG_WAIT_TIER");
+    }
+
+    #[test]
+    fn claim_uses_each_messages_lane_cursor_and_skips_completions() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = Broker::open(BrokerConfig::new(dir.path().to_path_buf())).unwrap();
+        let publish = |lane: &str| {
+            broker
+                .publish(PublishRequest {
+                    topic: String::new(),
+                    queue_id: None,
+                    group_id: None,
+                    group_member_id: None,
+                    routing_key: "same-shard".into(),
+                    payload: lane.into(),
+                    payload_encoding: None,
+                    idempotency_key: None,
+                    delay_ms: None,
+                    priority: None,
+                    flow_id: None,
+                    url: Some("https://example.com/hook".into()),
+                    secret: Some("secret".into()),
+                    destination: None,
+                    flow: Some(FlowSpec {
+                        key: Some(lane.into()),
+                        parallelism: Some(1),
+                        rate: None,
+                        period_secs: None,
+                    }),
+                    parallelism: None,
+                    max_retries: None,
+                    retry_backoff: None,
+                    method: None,
+                    headers: None,
+                    sign: None,
+                    request: None,
+                })
+                .unwrap()
+        };
+        let first = publish("lane-a");
+        let second = publish("lane-b");
+        broker.flush_wal().unwrap();
+        let topic = first.topic;
+        let partition = first.partition.unwrap();
+        let first_msg = broker
+            .read_message(&topic, partition, first.offset.unwrap())
+            .unwrap();
+        let second_msg = broker
+            .read_message(&topic, partition, second.offset.unwrap())
+            .unwrap();
+        let lane_a = cursor_key_for(&first_msg);
+        let lane_b = cursor_key_for(&second_msg);
+        assert_ne!(lane_a, lane_b);
+        let tenant = broker.tenant();
+        broker
+            .set_dispatch_offset(&tenant, &lane_a, partition, second_msg.offset + 1)
+            .unwrap();
+
+        let leases = LeaseTable::new();
+        let claimed = claim_from_broker(
+            &broker,
+            &leases,
+            None,
+            "worker",
+            8,
+            30_000,
+            Some(partition),
+            &|_| true,
+            &|_| 7,
+        );
+        assert_eq!(claimed.jobs.len(), 1);
+        assert_eq!(claimed.jobs[0].message_id, second_msg.id);
+        assert_eq!(claimed.jobs[0].cursor_key, lane_b);
+
+        leases.take(claimed.jobs[0].lease_id, "worker").unwrap();
+        broker
+            .mark_dispatch_complete(&tenant, &lane_b, partition, second_msg.offset)
+            .unwrap();
+        let again = claim_from_broker(
+            &broker,
+            &leases,
+            None,
+            "worker",
+            8,
+            30_000,
+            Some(partition),
+            &|_| true,
+            &|_| 7,
+        );
+        assert!(again.jobs.is_empty());
     }
 }

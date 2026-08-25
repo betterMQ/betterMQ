@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/panel/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BetterMQ</title>
+    <script>
+      (() => {
+        const stored = localStorage.getItem("themeMode");
+        const mode = stored === "dark" || stored === "light" || stored === "system" ? stored : "system";
+        const dark =
+          mode === "dark" ||
+          (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+        document.documentElement.dataset.themeMode = mode;
+      })();
+    </script>
+    <script src="/panel/panel-config.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

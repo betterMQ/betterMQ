@@ -66,12 +66,14 @@ pub struct RetryInput {
 }
 
 /// Enqueue into a named queue (`queue_id` preferred over `queue` name).
+/// Omit `key` for standard delivery (queue parallelism). Set `key` for FIFO per entity.
 #[derive(Debug, Deserialize)]
 pub struct EnqueueRequest {
     #[serde(default)]
     pub queue_id: Option<Uuid>,
     #[serde(default)]
     pub queue: String,
+    /// FIFO lane. Empty / omit = standard (use the queue's parallelism).
     #[serde(default)]
     pub key: String,
     #[serde(deserialize_with = "broker_partition::payload::deserialize_flexible_payload")]
@@ -83,11 +85,6 @@ pub struct EnqueueRequest {
     pub delay: Option<u64>,
     #[serde(default)]
     pub priority: Option<u8>,
-    #[serde(default)]
-    pub flow_id: Option<Uuid>,
-    /// Inline flow limits — ensure/reuse a profile by key (`flowControl` alias).
-    #[serde(default, alias = "flowControl")]
-    pub flow: Option<FlowSpec>,
     #[serde(flatten)]
     pub retry: RetryInput,
     #[serde(flatten)]
@@ -182,6 +179,9 @@ pub struct CreateQueueRequest {
     pub queue: String,
     pub url: String,
     pub secret: String,
+    /// Max in-flight for jobs without a `key`. `1` = serial queue. Omit / `0` = unconstrained.
+    #[serde(default)]
+    pub parallelism: Option<u32>,
     #[serde(flatten)]
     pub retry: RetryInput,
 }
@@ -229,11 +229,18 @@ pub struct EnqueueResponse {
     pub accepted: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deliveries: Option<Vec<GroupDeliveryRef>>,
+    /// Stable command identity used to derive each member idempotency key.
+    /// Reuse this value as `idempotency_key` to resume a partial fan-out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fanout_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct GroupDeliveryRef {
     pub member_id: Uuid,
+    pub accepted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<Uuid>,
     pub duplicate: bool,
@@ -243,6 +250,8 @@ pub struct GroupDeliveryRef {
     pub seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduled: Option<ScheduledInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,8 +281,13 @@ pub struct DlqMessage {
 #[derive(Debug, Deserialize)]
 pub struct DeleteDlqQuery {
     pub dlq_topic: String,
-    pub partition: u32,
-    pub offset: u64,
+    pub partition: Option<u32>,
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DlqDeleteResponse {
+    pub deleted: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,6 +307,10 @@ pub struct QueueResponse {
     pub queue_id: Uuid,
     pub queue: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -330,7 +348,7 @@ fn to_publish_enqueue(req: EnqueueRequest) -> Result<PublishRequest, ApiError> {
         idempotency_key: req.idempotency_key,
         delay_ms: req.delay,
         priority: req.priority,
-        flow_id: req.flow_id,
+        flow_id: None,
         url: None,
         secret: None,
         destination: None,
@@ -446,6 +464,8 @@ pub(crate) fn to_enqueue_response(inner: PublishResponse) -> EnqueueResponse {
         group_id: None,
         accepted: None,
         deliveries: None,
+        fanout_id: None,
+        partial: None,
     }
 }
 
@@ -457,7 +477,17 @@ fn to_group_delivery_ref(member_id: Uuid, resp: &PublishResponse) -> GroupDelive
         shard: resp.partition,
         seq: resp.offset,
         scheduled: resp.scheduled.clone(),
+        accepted: true,
+        error: None,
     }
+}
+
+fn fanout_max_attempts() -> u32 {
+    std::env::var("BETTERMQ_FANOUT_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(20u32)
+        .max(1)
 }
 
 async fn publish_to_group(
@@ -469,57 +499,263 @@ async fn publish_to_group(
     group_id: Uuid,
     base: PublishRequest,
 ) -> Result<(StatusCode, Json<EnqueueResponse>), ApiError> {
-    if state.broker.get_group(group_id)?.is_none() {
-        return Err(ApiError::BadRequest(format!("group not found: {group_id}")));
-    }
-    let members = state.broker.active_group_members(group_id)?;
-    if members.is_empty() {
-        return Err(ApiError::BadRequest(
-            "group has no active members".to_string(),
-        ));
-    }
-
     #[cfg(feature = "cloud")]
-    if state.uses_cloud_auth() {
-        if let (Some(auth), Some(plan)) =
-            (ingest.as_ref().map(|e| e.0), plan.as_ref().map(|e| &e.0))
+    let fanout_tenant = ingest
+        .as_ref()
+        .map(|auth| auth.0.tenant_id.to_string())
+        .unwrap_or_else(|| state.broker.tenant());
+    #[cfg(not(feature = "cloud"))]
+    let fanout_tenant = state.broker.tenant();
+    let fanout_id = match base.idempotency_key.as_deref() {
+        Some(key) => Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("tenant:{fanout_tenant}:fanout:{key}").as_bytes(),
+        ),
+        None => Uuid::new_v4(),
+    };
+    let fanout_store = crate::fanout::FanoutStore::open(&state.broker.config().data_dir)
+        .map_err(fanout_store_error)?;
+    let replicated_existing = state
+        .cluster
+        .as_ref()
+        .and_then(|cluster| cluster.runtime.controller())
+        .and_then(|controller| controller.state().fanout_outbox.get(&fanout_id).cloned())
+        .map(|entry| serde_json::from_str(&entry.payload_json))
+        .transpose()
+        .map_err(|error| fanout_store_error(crate::fanout::FanoutStoreError::Serde(error)))?;
+    let command = if let Some(existing) =
+        replicated_existing.or(fanout_store.get(fanout_id).map_err(fanout_store_error)?)
+    {
+        if existing.group_id != group_id
+            || (!existing.tenant_id.is_empty() && existing.tenant_id != fanout_tenant)
         {
-            let fanout = members.len();
-            crate::metering::check_cloud_batch_messages_cap(&state, auth.tenant_id, plan, fanout)
+            return Err(ApiError::Conflict(
+                "fanout id is already bound to another group".into(),
+            ));
+        }
+        existing
+    } else {
+        if state.broker.get_group(group_id)?.is_none() {
+            return Err(ApiError::BadRequest(format!("group not found: {group_id}")));
+        }
+        let members = state.broker.active_group_members(group_id)?;
+        if members.is_empty() {
+            return Err(ApiError::BadRequest(
+                "group has no active members".to_string(),
+            ));
+        }
+
+        #[cfg(feature = "cloud")]
+        if state.uses_cloud_auth() {
+            if let (Some(auth), Some(plan)) =
+                (ingest.as_ref().map(|e| e.0), plan.as_ref().map(|e| &e.0))
+            {
+                crate::metering::check_cloud_batch_messages_cap(
+                    &state,
+                    auth.tenant_id,
+                    plan,
+                    members.len(),
+                )
                 .await?;
-            if base.payload.len() as u64 > plan.max_message_bytes {
-                return Err(ApiError::BadRequest(format!(
-                    "message exceeds plan limit of {} bytes",
-                    plan.max_message_bytes
-                )));
+                if base.payload.len() as u64 > plan.max_message_bytes {
+                    return Err(ApiError::BadRequest(format!(
+                        "message exceeds plan limit of {} bytes",
+                        plan.max_message_bytes
+                    )));
+                }
+            }
+        }
+
+        let members = members
+            .into_iter()
+            .map(|member| {
+                let member_id = member.id;
+                let mut request = state
+                    .broker
+                    .group_member_publish_request(group_id, &member, &base);
+                request.idempotency_key = Some(format!(
+                    "fanout:{fanout_id}:group:{group_id}:member:{member_id}"
+                ));
+                crate::fanout::FanoutMemberCommand { member_id, request }
+            })
+            .collect();
+        let acceptance_bytes = serde_json::to_vec(&(fanout_tenant.as_str(), group_id, &members))
+            .map_err(|error| fanout_store_error(crate::fanout::FanoutStoreError::Serde(error)))?;
+        let acceptance_hash = Uuid::new_v5(&Uuid::NAMESPACE_OID, &acceptance_bytes).to_string();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        crate::fanout::FanoutCommand {
+            id: fanout_id,
+            acceptance_hash,
+            tenant_id: fanout_tenant,
+            group_id,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            members,
+            outcomes: std::collections::HashMap::new(),
+            completed: false,
+            completed_at_ms: None,
+        }
+    };
+    let command = crate::fanout::accept_authoritative(&state, &fanout_store, command)
+        .await
+        .map_err(fanout_store_error)?;
+    let claimed = crate::fanout::claim_authority(&state, &fanout_store, fanout_id)
+        .await
+        .map_err(fanout_store_error)?;
+    let execution_guard = claimed
+        .as_ref()
+        .and_then(|command| crate::fanout::try_begin_execution(command.id));
+    let can_execute = execution_guard.is_some();
+    let command = claimed.unwrap_or(command);
+
+    let mut deliveries = Vec::new();
+    let mut joins = tokio::task::JoinSet::new();
+    for member in command.members.clone() {
+        let member_id = member.member_id;
+        if let Some(outcome) = command.outcomes.get(&member_id) {
+            if let Some(response) = &outcome.response {
+                deliveries.push(to_group_delivery_ref(member_id, response));
+                continue;
+            }
+            if outcome.terminal || !can_execute {
+                deliveries.push(GroupDeliveryRef {
+                    member_id,
+                    accepted: false,
+                    message_id: None,
+                    duplicate: false,
+                    shard: None,
+                    seq: None,
+                    scheduled: None,
+                    error: outcome
+                        .error
+                        .clone()
+                        .or_else(|| Some("accepted for replay".into())),
+                });
+                continue;
+            }
+        } else if !can_execute {
+            deliveries.push(GroupDeliveryRef {
+                member_id,
+                accepted: false,
+                message_id: None,
+                duplicate: false,
+                shard: None,
+                seq: None,
+                scheduled: None,
+                error: Some("accepted for replay".into()),
+            });
+            continue;
+        }
+        let member_req = member.request;
+        let state = state.clone();
+        #[cfg(feature = "cloud")]
+        let plan = plan.clone();
+        joins.spawn(async move {
+            #[cfg(feature = "cloud")]
+            let result = publish(State(state), ingest, plan, Json(member_req))
+                .await
+                .map(|(_status, Json(inner))| inner);
+            #[cfg(not(feature = "cloud"))]
+            let result = publish(State(state), ingest, Json(member_req))
+                .await
+                .map(|(_status, Json(inner))| inner);
+            (member_id, result)
+        });
+    }
+    while let Some(joined) = joins.join_next().await {
+        let (member_id, result) =
+            joined.map_err(|e| ApiError::BadRequest(format!("fanout join: {e}")))?;
+        match result {
+            Ok(inner) => {
+                let attempts = command
+                    .outcomes
+                    .get(&member_id)
+                    .map(|outcome| outcome.attempts)
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                let updated = fanout_store
+                    .record_result(
+                        fanout_id,
+                        member_id,
+                        crate::fanout::FanoutMemberOutcome {
+                            response: Some(inner.clone()),
+                            error: None,
+                            attempts,
+                            next_attempt_at_ms: None,
+                            terminal: false,
+                        },
+                    )
+                    .map_err(fanout_store_error)?;
+                crate::fanout::update_authoritative(&state, &fanout_store, updated)
+                    .await
+                    .map_err(fanout_store_error)?;
+                deliveries.push(to_group_delivery_ref(member_id, &inner));
+            }
+            Err(error) => {
+                let error = format!("{error:?}");
+                let attempts = command
+                    .outcomes
+                    .get(&member_id)
+                    .map(|outcome| outcome.attempts)
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                let updated = fanout_store
+                    .record_result(
+                        fanout_id,
+                        member_id,
+                        crate::fanout::FanoutMemberOutcome {
+                            response: None,
+                            error: Some(error.clone()),
+                            attempts,
+                            next_attempt_at_ms: Some(
+                                chrono::Utc::now().timestamp_millis().saturating_add(
+                                    1_000i64
+                                        .saturating_mul(1i64 << attempts.saturating_sub(1).min(6)),
+                                ),
+                            ),
+                            terminal: attempts >= fanout_max_attempts(),
+                        },
+                    )
+                    .map_err(fanout_store_error)?;
+                crate::fanout::update_authoritative(&state, &fanout_store, updated)
+                    .await
+                    .map_err(fanout_store_error)?;
+                deliveries.push(GroupDeliveryRef {
+                    member_id,
+                    accepted: false,
+                    message_id: None,
+                    duplicate: false,
+                    shard: None,
+                    seq: None,
+                    scheduled: None,
+                    error: Some(error),
+                });
             }
         }
     }
-
-    let mut deliveries = Vec::new();
-    for member in members {
-        let member_req = state
-            .broker
-            .group_member_publish_request(group_id, &member, &base);
-        #[cfg(feature = "cloud")]
-        let (_status, Json(inner)) =
-            publish(State(state.clone()), ingest, plan.clone(), Json(member_req)).await?;
-        #[cfg(not(feature = "cloud"))]
-        let (_status, Json(inner)) =
-            publish(State(state.clone()), ingest, Json(member_req)).await?;
-        deliveries.push(to_group_delivery_ref(member.id, &inner));
-    }
+    deliveries.sort_by_key(|delivery| delivery.member_id);
 
     let accepted = deliveries
         .iter()
-        .filter(|d| !d.duplicate && d.scheduled.is_none())
+        .filter(|d| d.accepted && !d.duplicate && d.scheduled.is_none())
         .count()
-        + deliveries.iter().filter(|d| d.scheduled.is_some()).count();
+        + deliveries
+            .iter()
+            .filter(|d| d.accepted && d.scheduled.is_some())
+            .count();
+    let failed = deliveries.iter().filter(|d| !d.accepted).count();
+    let succeeded = deliveries.len().saturating_sub(failed);
+    let partial = failed > 0 && succeeded > 0;
     let any_scheduled = deliveries.iter().any(|d| d.scheduled.is_some());
-    let all_dup = deliveries
-        .iter()
-        .all(|d| d.duplicate && d.scheduled.is_none());
-    let status = if all_dup && !any_scheduled {
+    let all_dup = failed == 0
+        && deliveries
+            .iter()
+            .all(|d| d.duplicate && d.scheduled.is_none());
+    let status = if !can_execute {
+        StatusCode::ACCEPTED
+    } else if failed > 0 {
+        StatusCode::MULTI_STATUS
+    } else if all_dup && !any_scheduled {
         StatusCode::OK
     } else {
         StatusCode::ACCEPTED
@@ -535,8 +771,288 @@ async fn publish_to_group(
             group_id: Some(group_id),
             accepted: Some(accepted),
             deliveries: Some(deliveries),
+            fanout_id: Some(fanout_id),
+            partial: Some(partial),
         }),
     ))
+}
+
+fn dlq_retention_days() -> Option<u64> {
+    let raw = std::env::var("BETTERMQ_DLQ_RETENTION_DAYS").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "0" || raw.eq_ignore_ascii_case("never") {
+        return None;
+    }
+    raw.parse().ok().filter(|days| *days > 0)
+}
+
+pub(crate) fn spawn_dlq_retention(state: Arc<AppState>) {
+    let Some(days) = dlq_retention_days() else {
+        return;
+    };
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let interval_ms = std::env::var("BETTERMQ_DLQ_RETENTION_INTERVAL_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(900_000u64)
+        .clamp(5_000, 86_400_000);
+    tracing::info!(days, interval_ms, "DLQ retention enabled");
+    runtime.spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if crate::admission::is_shutting_down() {
+                break;
+            }
+            let cutoff =
+                chrono::Utc::now().timestamp_millis() - (days as i64).saturating_mul(86_400_000);
+            let topics = match collect_dlq_topic_candidates(&state) {
+                Ok(topics) => topics,
+                Err(error) => {
+                    tracing::warn!(%error, "DLQ retention scan failed");
+                    continue;
+                }
+            };
+            for topic in topics {
+                match state.broker.purge_dlq_topic(&topic, Some(cutoff)) {
+                    Ok(0) => {}
+                    Ok(deleted) => {
+                        tracing::info!(topic, deleted, days, "purged expired DLQ messages")
+                    }
+                    Err(error) => tracing::warn!(topic, %error, "DLQ retention purge failed"),
+                }
+            }
+        }
+    });
+}
+
+pub(crate) fn spawn_fanout_replay(state: Arc<AppState>) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        let store = match crate::fanout::FanoutStore::open(&state.broker.config().data_dir) {
+            Ok(store) => store,
+            Err(error) => {
+                tracing::error!(%error, "fanout replay disabled: store open failed");
+                return;
+            }
+        };
+        let replay_interval_ms = std::env::var("BETTERMQ_FANOUT_REPLAY_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2_000u64)
+            .clamp(100, 60_000);
+        let retention_ms = std::env::var("BETTERMQ_FANOUT_RETENTION_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(86_400_000i64)
+            .max(60_000);
+        let max_completed = std::env::var("BETTERMQ_FANOUT_MAX_COMPLETED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10_000usize)
+            .max(1);
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_millis(replay_interval_ms));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if crate::admission::is_shutting_down() {
+                break;
+            }
+            let pending = match crate::fanout::pending_authoritative(&state, &store, 32) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tracing::warn!(%error, "fanout replay scan failed");
+                    continue;
+                }
+            };
+            for command in pending {
+                let claimed = match crate::fanout::claim_authority(&state, &store, command.id).await
+                {
+                    Ok(Some(command)) => command,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!(fanout_id = %command.id, %error, "fanout replay claim failed");
+                        continue;
+                    }
+                };
+                let Some(_execution_guard) = crate::fanout::try_begin_execution(claimed.id) else {
+                    continue;
+                };
+                if let Err(error) = replay_fanout_command(&state, &store, claimed).await {
+                    tracing::warn!(%error, "fanout replay execution failed");
+                }
+            }
+            if let Err(error) = crate::fanout::garbage_collect_authoritative(
+                &state,
+                &store,
+                chrono::Utc::now().timestamp_millis(),
+                retention_ms,
+                max_completed,
+            )
+            .await
+            {
+                tracing::warn!(%error, "fanout retention pass failed");
+            }
+        }
+    });
+}
+
+async fn replay_fanout_command(
+    state: &Arc<AppState>,
+    store: &crate::fanout::FanoutStore,
+    command: crate::fanout::FanoutCommand,
+) -> Result<(), ApiError> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    for member in command.members.clone() {
+        let existing = command.outcomes.get(&member.member_id);
+        if existing.is_some_and(|outcome| outcome.response.is_some()) {
+            continue;
+        }
+        if existing.is_some_and(|outcome| outcome.terminal) {
+            continue;
+        }
+        if existing
+            .and_then(|outcome| outcome.next_attempt_at_ms)
+            .is_some_and(|next| next > now_ms)
+        {
+            continue;
+        }
+        let attempts = existing
+            .map(|outcome| outcome.attempts)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let outcome = match crate::cluster::publish_with_cluster(state, member.request, None).await
+        {
+            Ok(response) => {
+                crate::cluster::enqueue_dispatch_after_publish(state, &response);
+                crate::fanout::FanoutMemberOutcome {
+                    response: Some(response),
+                    error: None,
+                    attempts,
+                    next_attempt_at_ms: None,
+                    terminal: false,
+                }
+            }
+            Err(error) => crate::fanout::FanoutMemberOutcome {
+                response: None,
+                error: Some(format!("{error:?}")),
+                attempts,
+                next_attempt_at_ms: Some(now_ms.saturating_add(
+                    1_000i64.saturating_mul(1i64 << attempts.saturating_sub(1).min(6)),
+                )),
+                terminal: attempts >= fanout_max_attempts(),
+            },
+        };
+        let updated = store
+            .record_result(command.id, member.member_id, outcome)
+            .map_err(fanout_store_error)?;
+        crate::fanout::update_authoritative(state, store, updated)
+            .await
+            .map_err(fanout_store_error)?;
+    }
+    Ok(())
+}
+
+fn fanout_store_error(error: crate::fanout::FanoutStoreError) -> ApiError {
+    ApiError::Broker(BrokerError::Storage(broker_storage::LogError::Io(
+        std::io::Error::other(error.to_string()),
+    )))
+}
+
+#[cfg(test)]
+mod fanout_tests {
+    use super::*;
+    use broker_dispatch::{DispatchConfig, DispatchEngine, LeaseTable};
+    use broker_partition::{Broker, BrokerConfig};
+    use broker_schedule::{CronRegistry, ScheduleQueue};
+
+    #[tokio::test]
+    async fn group_publish_returns_explicit_partial_member_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = Broker::open(BrokerConfig::new(dir.path().to_path_buf())).unwrap();
+        let group = broker.create_group("partial".into()).unwrap();
+        broker
+            .add_group_member(
+                group.id,
+                "valid".into(),
+                "https://example.com/hook".into(),
+                "secret".into(),
+                1,
+                0,
+                60,
+                None,
+            )
+            .unwrap();
+        broker
+            .add_group_member(
+                group.id,
+                "invalid".into(),
+                "not-a-url".into(),
+                "secret".into(),
+                1,
+                0,
+                60,
+                None,
+            )
+            .unwrap();
+        let state = Arc::new(AppState {
+            broker: broker.clone(),
+            schedule: ScheduleQueue::open(dir.path()).unwrap(),
+            crons: CronRegistry::open(dir.path()).unwrap(),
+            dispatch: DispatchEngine::new_broker_only(broker, DispatchConfig::default()),
+            leases: LeaseTable::new(),
+            cluster: None,
+            local_auth: None,
+            fair_queue: Arc::new(broker_dispatch::TenantFairQueue::new()),
+            catalog_tombstones: crate::catalog_tombstones::CatalogTombstones::open(dir.path())
+                .unwrap(),
+            dispatch_fleet: false,
+            broker_only: false,
+            #[cfg(feature = "cloud")]
+            auth: None,
+            #[cfg(feature = "cloud")]
+            control_plane: None,
+        });
+        let base = PublishRequest {
+            topic: String::new(),
+            queue_id: None,
+            group_id: Some(group.id),
+            group_member_id: None,
+            routing_key: "rk".into(),
+            payload: "body".into(),
+            payload_encoding: None,
+            idempotency_key: Some("fanout-command".into()),
+            delay_ms: None,
+            priority: None,
+            flow_id: None,
+            url: None,
+            secret: None,
+            destination: None,
+            flow: None,
+            parallelism: None,
+            max_retries: None,
+            retry_backoff: None,
+            method: None,
+            headers: None,
+            sign: None,
+            request: None,
+        };
+
+        let (status, Json(response)) = publish_to_group(state, None, group.id, base).await.unwrap();
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert_eq!(response.accepted, Some(1));
+        assert_eq!(response.partial, Some(true));
+        let deliveries = response.deliveries.unwrap();
+        assert_eq!(deliveries.len(), 2);
+        assert_eq!(deliveries.iter().filter(|d| d.accepted).count(), 1);
+        assert_eq!(deliveries.iter().filter(|d| d.error.is_some()).count(), 1);
+    }
 }
 
 fn parse_dlq_payload(body: &str) -> (Option<String>, Option<String>, Option<String>, String) {
@@ -667,6 +1183,18 @@ fn to_queue_response(inner: CreateSubscriptionResponse) -> QueueResponse {
         queue_id: inner.id,
         queue: inner.topic,
         url: inner.url,
+        parallelism: inner.parallelism,
+        max_retries: inner.default_max_retries,
+    }
+}
+
+fn queue_response(s: &Subscription) -> QueueResponse {
+    QueueResponse {
+        queue_id: s.id,
+        queue: s.topic.clone(),
+        url: s.url.clone(),
+        parallelism: s.parallelism,
+        max_retries: s.default_max_retries,
     }
 }
 
@@ -784,11 +1312,7 @@ async fn enqueue(
     >,
     Json(req): Json<EnqueueRequest>,
 ) -> Result<(StatusCode, Json<EnqueueResponse>), ApiError> {
-    let inline_flow = req.flow.clone();
-    let mut pr = to_publish_enqueue(req)?;
-    if let Some(flow) = inline_flow {
-        apply_inline_flow(&state, &mut pr, &flow).await?;
-    }
+    let pr = to_publish_enqueue(req)?;
     #[cfg(feature = "cloud")]
     let (status, Json(inner)) = publish(State(state), ingest, plan, Json(pr)).await?;
     #[cfg(not(feature = "cloud"))]
@@ -843,20 +1367,35 @@ async fn list_dlq(
 async fn delete_dlq_message(
     State(state): State<Arc<AppState>>,
     Query(q): Query<DeleteDlqQuery>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     if !is_dlq_topic(&q.dlq_topic) {
         return Err(ApiError::BadRequest(
             "dlq_topic must end with .__dlq".into(),
         ));
     }
-    let removed = state
-        .broker
-        .purge_dlq_message(&q.dlq_topic, q.partition, q.offset)
-        .map_err(ApiError::Broker)?;
-    if removed {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::BadRequest("DLQ message not found".into()))
+    match (q.partition, q.offset) {
+        (None, None) => {
+            let deleted = state
+                .broker
+                .purge_dlq_topic(&q.dlq_topic, None)
+                .map_err(ApiError::Broker)?;
+            Ok((StatusCode::OK, Json(DlqDeleteResponse { deleted })).into_response())
+        }
+        (Some(partition), Some(offset)) => {
+            let removed = state
+                .broker
+                .purge_dlq_message(&q.dlq_topic, partition, offset)
+                .map_err(ApiError::Broker)?;
+            if removed {
+                Ok(StatusCode::NO_CONTENT.into_response())
+            } else {
+                Err(ApiError::BadRequest("DLQ message not found".into()))
+            }
+        }
+        _ => Err(ApiError::BadRequest(
+            "provide both partition and offset, or omit both to delete all messages on dlq_topic"
+                .into(),
+        )),
     }
 }
 
@@ -890,6 +1429,7 @@ async fn create_queue(
             topic: req.queue,
             url: req.url.clone(),
             secret: req.secret.clone(),
+            parallelism: req.parallelism,
             default_max_retries: req.retry.max_retries,
             retry_backoff: req.retry.retry_backoff.clone(),
         }),
@@ -904,9 +1444,8 @@ async fn create_queue(
             url: inner.url.clone(),
             secret: req.secret,
             paused: false,
-            parallelism: None,
-            flow: None,
-            default_max_retries: req.retry.max_retries,
+            parallelism: inner.parallelism,
+            default_max_retries: inner.default_max_retries,
             retry_backoff: req.retry.retry_backoff.clone(),
             updated_at_ms: chrono::Utc::now().timestamp_millis(),
         },
@@ -956,11 +1495,7 @@ async fn list_queues(
         .broker
         .list_endpoints()?
         .into_iter()
-        .map(|s| QueueResponse {
-            queue_id: s.id,
-            queue: s.topic,
-            url: s.url,
-        })
+        .map(|s| queue_response(&s))
         .collect();
     Ok(Json(QueueListResponse { queues }))
 }
@@ -971,14 +1506,7 @@ async fn delete_queue(
 ) -> Result<(StatusCode, Json<QueueResponse>), ApiError> {
     let s = state.broker.delete_endpoint(queue_id)?;
     crate::cluster::replicate_queue_delete(&state, queue_id).await;
-    Ok((
-        StatusCode::OK,
-        Json(QueueResponse {
-            queue_id: s.id,
-            queue: s.topic,
-            url: s.url,
-        }),
-    ))
+    Ok((StatusCode::OK, Json(queue_response(&s))))
 }
 
 #[derive(Debug, Serialize)]
@@ -1045,6 +1573,9 @@ impl From<ScheduleError> for DelayedApiError {
             ScheduleError::Io(e) => DelayedApiError::Internal(e.to_string()),
             ScheduleError::Serde(e) => DelayedApiError::Internal(e.to_string()),
             ScheduleError::MetadataLoad(e) => DelayedApiError::Internal(e.to_string()),
+            ScheduleError::UnsupportedVersion(version) => DelayedApiError::Internal(format!(
+                "unsupported delayed schedule version: {version}"
+            )),
         }
     }
 }
@@ -1188,7 +1719,9 @@ async fn global_flow(State(state): State<Arc<AppState>>) -> Json<GlobalParalleli
 
 #[derive(Debug, Deserialize)]
 pub struct CreateCronRequest {
-    /// Cron expression (5 fields: `min hour dom month dow`, or 6 with leading seconds). UTC.
+    /// Cron expression (5 fields: `min hour dom month dow`, or 6 with leading seconds).
+    /// Default timezone is UTC. Prefix with `CRON_TZ=<IANA> ` to schedule in a local zone,
+    /// e.g. `CRON_TZ=America/New_York */5 * * * *`.
     /// Provide **either** `cron` or `every_seconds`, not both.
     #[serde(default)]
     pub cron: Option<String>,
@@ -1339,9 +1872,14 @@ async fn build_cron_scheduled_request(
             .await
             .map_err(|e| match e {
                 ApiError::Broker(be) => CronApiError::BadRequest(be.to_string()),
-                ApiError::BadRequest(m) => CronApiError::BadRequest(m),
-                ApiError::ReplicationFailed(m) => CronApiError::BadRequest(m),
-                ApiError::Unauthorized(m) => CronApiError::BadRequest(m),
+                ApiError::BadRequest(m)
+                | ApiError::Unauthorized(m)
+                | ApiError::NotFound(m)
+                | ApiError::Conflict(m)
+                | ApiError::Unavailable(m)
+                | ApiError::ReplicationFailed(m)
+                | ApiError::Overloaded { message: m, .. }
+                | ApiError::TooManyRequests { message: m, .. } => CronApiError::BadRequest(m),
             })?;
     let mut scheduled = ScheduledPublishRequest {
         topic: destination

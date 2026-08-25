@@ -72,6 +72,7 @@ async fn direct_publish_delivers_without_flow_delay() {
                 request: None,
             })
             .unwrap();
+        broker.flush_wal().unwrap();
         dispatch.enqueue(broker_dispatch::DeliveryJob::live(
             DIRECT_TOPIC.to_string(),
             resp.partition.unwrap(),

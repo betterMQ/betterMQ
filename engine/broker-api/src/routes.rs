@@ -7,9 +7,8 @@ use axum::{
 };
 use broker_partition::{
     BrokerError, CreateSubscriptionRequest, CreateSubscriptionResponse, DestinationSnapshot,
-    PublishRequest, PublishResponse, ScheduledInfo,
+    FlowProfileError, PublishRequest, PublishResponse,
 };
-use broker_schedule::ScheduledPublishRequest;
 use std::sync::Arc;
 use tracing::info;
 
@@ -17,7 +16,7 @@ pub(crate) async fn publish(
     State(state): State<Arc<AppState>>,
     ingest: Option<Extension<crate::metering::IngestAuth>>,
     #[cfg(feature = "cloud")] plan: Option<Extension<broker_control_plane::PlanLimits>>,
-    Json(mut req): Json<PublishRequest>,
+    Json(req): Json<PublishRequest>,
 ) -> Result<(StatusCode, Json<PublishResponse>), ApiError> {
     #[cfg(feature = "cloud")]
     if state.uses_cloud_auth() {
@@ -30,57 +29,17 @@ pub(crate) async fn publish(
             }
         }
     }
-    validate_publish_destinations(&req)?;
-    if let Some(delay_ms) = req.delay_ms.take() {
-        let destination = snapshot_destination(&state, &req).await?;
-        let scheduled = state.schedule.schedule(
-            ScheduledPublishRequest {
-                topic: req.topic.clone(),
-                routing_key: req.routing_key.clone(),
-                payload: req.payload.clone(),
-                payload_encoding: req.payload_encoding.clone(),
-                idempotency_key: req.idempotency_key.clone(),
-                priority: req.priority,
-                parallelism: req.parallelism,
-                flow_id: req.flow_id,
-                queue_id: req.queue_id,
-                destination: Some(destination),
-                flow: req.flow.clone(),
-                max_retries: req.max_retries,
-                retry_backoff: req.retry_backoff.clone(),
-                method: req.method.clone(),
-                headers: req.headers.clone(),
-                sign: req.sign,
-                request: req.request.clone(),
-            },
-            delay_ms,
-        )?;
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(PublishResponse {
-                message_id: None,
-                topic: req.topic,
-                partition: None,
-                offset: None,
-                duplicate: false,
-                scheduled: Some(ScheduledInfo {
-                    schedule_id: scheduled.id,
-                    deliver_at_ms: scheduled.deliver_at_ms,
-                }),
-                replication_frame: None,
-            }),
-        ));
-    }
-
     let meter = crate::metering::ingest_meter(ingest.map(|e| e.0), req.payload.len());
-    let resp = crate::cluster::publish_with_cluster(&state, req, meter).await?;
-    crate::cluster::enqueue_dispatch_after_publish(&state, &resp);
-
-    let status = if resp.duplicate {
-        StatusCode::OK
-    } else {
-        StatusCode::ACCEPTED
-    };
+    let resp = crate::ingest::submit_one(&state, req, meter).await?;
+    if resp.scheduled.is_none() {
+        crate::ingest::notify_dispatch(&state, &resp);
+    }
+    if resp.duplicate {
+        crate::metrics::record_duplicate();
+    } else if resp.scheduled.is_none() {
+        crate::metrics::record_accepted();
+    }
+    let status = crate::ingest::status_for(&resp);
     Ok((status, Json(resp)))
 }
 
@@ -177,12 +136,45 @@ pub enum ApiError {
     Broker(BrokerError),
     BadRequest(String),
     Unauthorized(String),
+    NotFound(String),
+    Conflict(String),
+    Unavailable(String),
     ReplicationFailed(String),
+    Overloaded {
+        retry_after_ms: u64,
+        message: String,
+    },
+    TooManyRequests {
+        retry_after_ms: u64,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Broker(error) => write!(formatter, "{error}"),
+            Self::BadRequest(message)
+            | Self::Unauthorized(message)
+            | Self::NotFound(message)
+            | Self::Conflict(message)
+            | Self::Unavailable(message)
+            | Self::ReplicationFailed(message) => formatter.write_str(message),
+            Self::Overloaded { message, .. } | Self::TooManyRequests { message, .. } => {
+                formatter.write_str(message)
+            }
+        }
+    }
 }
 
 impl From<BrokerError> for ApiError {
     fn from(e: BrokerError) -> Self {
-        Self::Broker(e)
+        match e {
+            BrokerError::FlowProfile(FlowProfileError::Duplicate(id)) => {
+                Self::Conflict(format!("duplicate flow {id}"))
+            }
+            other => Self::Broker(other),
+        }
     }
 }
 
@@ -192,6 +184,13 @@ impl From<broker_schedule::ScheduleError> for ApiError {
             std::io::Error::other(e.to_string()),
         )))
     }
+}
+
+fn retry_after_seconds(retry_after_ms: u64) -> u64 {
+    retry_after_ms
+        .saturating_add(999)
+        .saturating_div(1_000)
+        .max(1)
 }
 
 impl IntoResponse for ApiError {
@@ -207,21 +206,119 @@ impl IntoResponse for ApiError {
                 Json(serde_json::json!({ "error": msg })),
             )
                 .into_response(),
+            ApiError::NotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response(),
+            ApiError::Conflict(msg) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response(),
+            ApiError::Unavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": msg, "code": "not_shard_leader" })),
+            )
+                .into_response(),
             ApiError::ReplicationFailed(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({ "error": msg })),
             )
                 .into_response(),
+            ApiError::Overloaded {
+                retry_after_ms,
+                message,
+            } => {
+                let mut resp = (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": message, "code": "saturated" })),
+                )
+                    .into_response();
+                if let Ok(v) = axum::http::HeaderValue::from_str(
+                    &retry_after_seconds(retry_after_ms).to_string(),
+                ) {
+                    resp.headers_mut().insert("retry-after", v);
+                }
+                resp
+            }
+            ApiError::TooManyRequests {
+                retry_after_ms,
+                message,
+            } => {
+                let mut resp = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({ "error": message, "code": "quota" })),
+                )
+                    .into_response();
+                if let Ok(v) = axum::http::HeaderValue::from_str(
+                    &retry_after_seconds(retry_after_ms).to_string(),
+                ) {
+                    resp.headers_mut().insert("retry-after", v);
+                }
+                resp
+            }
             ApiError::Broker(e) => {
-                let status = match &e {
+                let (status, code, msg) = match &e {
                     BrokerError::QueueNotFound(_) | BrokerError::FlowProfileNotFound(_) => {
-                        StatusCode::NOT_FOUND
+                        (StatusCode::NOT_FOUND, "not_found", e.to_string())
                     }
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    BrokerError::NotShardLeader(_) => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "not_shard_leader",
+                        "not shard leader".to_string(),
+                    ),
+                    BrokerError::InvalidName(_) | BrokerError::InvalidConfig(_) => {
+                        (StatusCode::BAD_REQUEST, "invalid_request", e.to_string())
+                    }
+                    other => {
+                        tracing::error!(error = %other, "broker error");
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "internal_error",
+                            "internal error".to_string(),
+                        )
+                    }
                 };
-                let body = serde_json::json!({ "error": e.to_string() });
+                let body = serde_json::json!({ "error": msg, "code": code });
                 (status, Json(body)).into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header::RETRY_AFTER;
+
+    #[test]
+    fn retry_after_is_whole_seconds_not_milliseconds() {
+        assert_eq!(retry_after_seconds(1), 1);
+        assert_eq!(retry_after_seconds(1_000), 1);
+        assert_eq!(retry_after_seconds(1_001), 2);
+
+        let response = ApiError::Overloaded {
+            retry_after_ms: 1_500,
+            message: "busy".into(),
+        }
+        .into_response();
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "2");
+    }
+
+    #[test]
+    fn tenant_saturation_is_429_and_system_saturation_is_503() {
+        let tenant = ApiError::TooManyRequests {
+            retry_after_ms: 1_000,
+            message: "tenant".into(),
+        }
+        .into_response();
+        let system = ApiError::Overloaded {
+            retry_after_ms: 1_000,
+            message: "system".into(),
+        }
+        .into_response();
+        assert_eq!(tenant.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(system.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

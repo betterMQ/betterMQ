@@ -15,6 +15,10 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
+crc32fast = { workspace = true }
+uuid = { workspace = true }
+bytes = "1"
+futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = crate::components::CONFIG_VERSION_V2;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -31,6 +31,15 @@ pub struct BetterMqConfig {
     pub dispatch: DispatchConfigSection,
     #[serde(default)]
     pub cluster: Option<ClusterConfigSection>,
+    /// V2 component profile or include list. Absent on V1 files; resolved in memory.
+    #[serde(default)]
+    pub components: Option<crate::components::ComponentSpec>,
+    #[serde(default)]
+    pub listeners: Option<crate::components::ListenerSection>,
+    #[serde(default)]
+    pub panel: Option<crate::components::PanelSection>,
+    #[serde(default)]
+    pub replication: Option<crate::components::ReplicationPolicyConfig>,
 }
 
 fn default_version() -> u32 {
@@ -156,9 +165,11 @@ pub struct ClusterNode {
 
 impl BetterMqConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.version != CONFIG_VERSION {
+        if self.version != crate::components::CONFIG_VERSION_V1
+            && self.version != crate::components::CONFIG_VERSION_V2
+        {
             return Err(ConfigError::Invalid(format!(
-                "unsupported config version {} (expected {CONFIG_VERSION})",
+                "unsupported config version {} (expected 1 or {CONFIG_VERSION})",
                 self.version
             )));
         }
@@ -221,7 +232,8 @@ impl BetterMqConfig {
                     )));
                 }
                 // HA M2: multi-node local WAL requires shared meta for fencing, leases, cursors.
-                if cluster.nodes.len() >= 2 {
+                if cluster.nodes.len() >= 2 && self.version == crate::components::CONFIG_VERSION_V1
+                {
                     let is_local = matches!(self.storage, StorageConfig::Local);
                     let has_shared = cluster
                         .shared_meta_dir
@@ -230,7 +242,7 @@ impl BetterMqConfig {
                         .unwrap_or(false);
                     if is_local && !has_shared {
                         return Err(ConfigError::Invalid(
-                            "cluster with 2+ nodes and local storage requires cluster.sharedMetaDir (fencing, scheduler lease, shared cursors)"
+                            "V1 cluster with 2+ nodes and local storage requires cluster.sharedMetaDir; V2 uses the controller registry instead"
                                 .into(),
                         ));
                     }
@@ -301,6 +313,10 @@ impl BetterMqConfig {
             auth: AuthConfig::Local { auth_file: None },
             dispatch: DispatchConfigSection::default(),
             cluster: None,
+            components: None,
+            listeners: None,
+            panel: None,
+            replication: None,
         }
     }
 
@@ -319,14 +335,18 @@ impl BetterMqConfig {
                     endpoint: "http://minio:9000".into(),
                     bucket: "bettermq".into(),
                     payload_bucket: Some("bettermq-payloads".into()),
-                    access_key: "minio".into(),
-                    secret_key: "minio12345".into(),
+                    access_key: "SET_S3_ACCESS_KEY".into(),
+                    secret_key: "SET_S3_SECRET_KEY".into(),
                     region: default_region(),
                 },
             },
             auth: AuthConfig::Local { auth_file: None },
             dispatch: DispatchConfigSection::default(),
             cluster: None,
+            components: None,
+            listeners: None,
+            panel: None,
+            replication: None,
         }
     }
 
@@ -364,6 +384,13 @@ impl BetterMqConfig {
                 ],
                 shared_meta_dir: Some(PathBuf::from("/cluster-shared/meta")),
             }),
+            components: Some(crate::components::ComponentSpec {
+                profile: Some("all".into()),
+                include: Vec::new(),
+            }),
+            listeners: None,
+            panel: None,
+            replication: Some(crate::components::ReplicationPolicyConfig::default()),
         }
     }
 
@@ -383,8 +410,8 @@ impl BetterMqConfig {
                     endpoint: "http://minio:9000".into(),
                     bucket: "bettermq".into(),
                     payload_bucket: Some("bettermq-payloads".into()),
-                    access_key: "minio".into(),
-                    secret_key: "minio12345".into(),
+                    access_key: "SET_S3_ACCESS_KEY".into(),
+                    secret_key: "SET_S3_SECRET_KEY".into(),
                     region: default_region(),
                 },
             },
@@ -393,6 +420,10 @@ impl BetterMqConfig {
             },
             dispatch: DispatchConfigSection::default(),
             cluster: None,
+            components: None,
+            listeners: None,
+            panel: None,
+            replication: None,
         }
     }
 }
@@ -434,6 +465,7 @@ mod tests {
     #[test]
     fn rejects_multi_node_local_without_shared_meta() {
         let mut cfg = BetterMqConfig::template_cluster_local();
+        cfg.version = crate::components::CONFIG_VERSION_V1;
         if let Some(c) = cfg.cluster.as_mut() {
             c.shared_meta_dir = None;
         }
@@ -458,5 +490,18 @@ mod tests {
         ] {
             cfg.validate().expect("template config valid");
         }
+    }
+
+    #[test]
+    fn v1_config_still_validates_without_rewrite() {
+        let json = r#"{
+            "version": 1,
+            "node": {"name": "default", "listen": "127.0.0.1:8080", "publicUrl": "http://127.0.0.1:8080"},
+            "dataDir": "./data"
+        }"#;
+        let cfg: BetterMqConfig = serde_json::from_str(json).unwrap();
+        cfg.validate().expect("v1 config loads");
+        assert_eq!(cfg.version, 1);
+        assert!(cfg.components.is_none());
     }
 }

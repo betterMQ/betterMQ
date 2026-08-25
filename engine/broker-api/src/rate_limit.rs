@@ -49,12 +49,24 @@ impl RateLimiter {
     }
 }
 
+fn trust_proxy() -> bool {
+    matches!(
+        std::env::var("BETTERMQ_TRUST_PROXY")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
 pub fn client_ip_key(headers: &axum::http::HeaderMap, fallback: Option<IpAddr>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let ip = first.trim();
-            if !ip.is_empty() {
-                return ip.to_string();
+    if trust_proxy() {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = xff.split(',').next() {
+                let ip = first.trim();
+                if !ip.is_empty() {
+                    return ip.to_string();
+                }
             }
         }
     }

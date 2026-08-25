@@ -4,11 +4,12 @@ use broker_partition::ResolvedFlow;
 use broker_storage::StoredMessage;
 use chrono::Utc;
 use serde::Serialize;
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::memory_guard::MemoryGuard;
@@ -61,37 +62,58 @@ struct FlowWork {
 struct OrderedWork {
     backfill: bool,
     priority: u8,
+    published_at_ms: i64,
+    partition: u32,
     offset: u64,
     seq: u64,
     work: FlowWork,
 }
 
-impl Eq for OrderedWork {}
+type FifoOrder = (i64, u32, u64, u64);
+type PriorityOrder = (bool, u8, Reverse<u64>, Reverse<u64>);
 
-impl PartialEq for OrderedWork {
-    fn eq(&self, other: &Self) -> bool {
-        self.backfill == other.backfill
-            && self.priority == other.priority
-            && self.offset == other.offset
-            && self.seq == other.seq
+#[derive(Default)]
+struct WorkQueue {
+    items: HashMap<u64, OrderedWork>,
+    fifo: BTreeSet<FifoOrder>,
+    priority: BTreeSet<PriorityOrder>,
+}
+
+impl WorkQueue {
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn push(&mut self, item: OrderedWork) {
+        self.fifo.insert(fifo_order(&item));
+        self.priority.insert(priority_order(&item));
+        self.items.insert(item.seq, item);
+    }
+
+    fn pop(&mut self, strict_fifo: bool) -> Option<OrderedWork> {
+        let sequence = if strict_fifo {
+            self.fifo.first().map(|key| key.3)
+        } else {
+            self.priority.last().map(|key| key.3 .0)
+        }?;
+        let item = self.items.remove(&sequence)?;
+        self.fifo.remove(&fifo_order(&item));
+        self.priority.remove(&priority_order(&item));
+        Some(item)
     }
 }
 
-impl Ord for OrderedWork {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .backfill
-            .cmp(&self.backfill)
-            .then_with(|| self.priority.cmp(&other.priority))
-            .then_with(|| other.offset.cmp(&self.offset))
-            .then_with(|| other.seq.cmp(&self.seq))
-    }
+fn fifo_order(item: &OrderedWork) -> FifoOrder {
+    (item.published_at_ms, item.partition, item.offset, item.seq)
 }
 
-impl PartialOrd for OrderedWork {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
+fn priority_order(item: &OrderedWork) -> PriorityOrder {
+    (
+        !item.backfill,
+        item.priority,
+        Reverse(item.offset),
+        Reverse(item.seq),
+    )
 }
 
 struct RateWindow {
@@ -136,7 +158,7 @@ impl RateWindow {
 
 struct FlowLane {
     limits: Mutex<ResolvedFlow>,
-    waitlist: Mutex<BinaryHeap<OrderedWork>>,
+    waitlist: Mutex<WorkQueue>,
     active: AtomicU32,
     rate: Mutex<RateWindow>,
     paused: Mutex<bool>,
@@ -150,6 +172,8 @@ pub struct FlowController {
     global_max_parallelism: Option<u32>,
     global_active: Arc<AtomicU32>,
     memory_guard: Arc<MemoryGuard>,
+    stop: Arc<AtomicBool>,
+    drainers: Arc<parking_lot::Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl FlowController {
@@ -159,7 +183,14 @@ impl FlowController {
             global_max_parallelism,
             global_active: Arc::new(AtomicU32::new(0)),
             memory_guard,
+            stop: Arc::new(AtomicBool::new(false)),
+            drainers: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn take_drainer_tasks(&self) -> Vec<JoinHandle<()>> {
+        self.stop.store(true, AtomicOrdering::Release);
+        std::mem::take(&mut *self.drainers.lock())
     }
 
     pub async fn submit(
@@ -170,9 +201,10 @@ impl FlowController {
         limits: ResolvedFlow,
         backfill: bool,
     ) {
+        let flow_key = limits.key.clone();
         let key = FlowKey {
             endpoint_id: lane_owner,
-            flow_key: limits.key.clone(),
+            flow_key: flow_key.clone(),
         };
         let lane = self.get_or_create_lane(key, limits).await;
         let work = FlowWork {
@@ -180,9 +212,26 @@ impl FlowController {
             msg: Arc::new(msg),
             backfill,
         };
-        lane.waitlist.lock().await.push(OrderedWork {
+        let mut heap = lane.waitlist.lock().await;
+        let cap = std::env::var("BETTERMQ_FLOW_WAITLIST_CAP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8192)
+            .max(1);
+        if heap.len() >= cap {
+            tracing::warn!(
+                endpoint_id = %lane_owner,
+                flow_key = %flow_key,
+                cap,
+                "flow waitlist full; dropping work (backfill will retry)"
+            );
+            return;
+        }
+        heap.push(OrderedWork {
             backfill: work.backfill,
             priority: work.msg.priority,
+            published_at_ms: work.msg.published_at_ms,
+            partition: work.msg.partition,
             offset: work.msg.offset,
             seq: ENQUEUE_SEQ.fetch_add(1, AtomicOrdering::Relaxed),
             work,
@@ -215,6 +264,17 @@ impl FlowController {
             parallelism_max: self.global_max_parallelism,
             parallelism_count: self.global_active.load(AtomicOrdering::Relaxed),
         }
+    }
+
+    pub async fn pending_count(&self) -> usize {
+        let lanes = self.lanes.lock().await;
+        let mut pending = 0usize;
+        for lane in lanes.values() {
+            pending = pending
+                .saturating_add(lane.waitlist.lock().await.len())
+                .saturating_add(lane.active.load(AtomicOrdering::Acquire) as usize);
+        }
+        pending
     }
 
     /// Create the in-memory lane if missing (so pause/pin work before first delivery).
@@ -355,7 +415,7 @@ impl FlowController {
         }
         let lane = Arc::new(FlowLane {
             limits: Mutex::new(limits.clone()),
-            waitlist: Mutex::new(BinaryHeap::new()),
+            waitlist: Mutex::new(WorkQueue::default()),
             active: AtomicU32::new(0),
             rate: Mutex::new(RateWindow::new(limits.rate, limits.period_secs)),
             paused: Mutex::new(false),
@@ -366,12 +426,16 @@ impl FlowController {
             }),
             notify: Notify::new(),
         });
-        spawn_lane_drainer(
-            lane.clone(),
-            self.global_max_parallelism,
-            self.global_active.clone(),
-            self.memory_guard.clone(),
-        );
+        if !self.stop.load(AtomicOrdering::Acquire) {
+            spawn_lane_drainer(
+                lane.clone(),
+                self.global_max_parallelism,
+                self.global_active.clone(),
+                self.memory_guard.clone(),
+                self.stop.clone(),
+                self.drainers.clone(),
+            );
+        }
         map.insert(key, lane.clone());
         lane
     }
@@ -398,16 +462,27 @@ fn spawn_lane_drainer(
     global_max: Option<u32>,
     global_active: Arc<AtomicU32>,
     memory_guard: Arc<MemoryGuard>,
+    stop: Arc<AtomicBool>,
+    drainers: Arc<parking_lot::Mutex<Vec<JoinHandle<()>>>>,
 ) {
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
+            if stop.load(AtomicOrdering::Acquire) {
+                break;
+            }
             if memory_guard.is_critical() {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if stop.load(AtomicOrdering::Acquire) {
+                    break;
+                }
                 lane.notify.notify_one();
                 continue;
             }
 
             if *lane.paused.lock().await {
+                if stop.load(AtomicOrdering::Acquire) {
+                    break;
+                }
                 lane.notify.notified().await;
                 continue;
             }
@@ -429,13 +504,16 @@ fn spawn_lane_drainer(
             let now_ms = Utc::now().timestamp_millis();
             if !lane.rate.lock().await.try_acquire(now_ms) {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if stop.load(AtomicOrdering::Acquire) {
+                    break;
+                }
                 lane.notify.notify_one();
                 continue;
             }
 
             let next = {
                 let mut heap = lane.waitlist.lock().await;
-                heap.pop()
+                heap.pop(parallelism == 1)
             };
             let Some(ordered) = next else {
                 lane.notify.notified().await;
@@ -460,4 +538,5 @@ fn spawn_lane_drainer(
             });
         }
     });
+    drainers.lock().push(handle);
 }

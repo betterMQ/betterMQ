@@ -2,16 +2,18 @@
 
 use broker_partition::HttpDeliverySpec;
 use broker_storage::StoredMessage;
+use bytes::Bytes;
 use chrono::Utc;
 use reqwest::Method;
 use std::str::FromStr;
 
 use crate::hmac_sig::sign_payload;
 
+#[derive(Clone)]
 pub struct OutboundRequest {
     pub method: Method,
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 pub fn build_outbound(msg: &StoredMessage) -> OutboundRequest {
@@ -25,10 +27,14 @@ pub fn build_outbound(msg: &StoredMessage) -> OutboundRequest {
 
 pub fn build_outbound_with_spec(msg: &StoredMessage, spec: &HttpDeliverySpec) -> OutboundRequest {
     let method = parse_method(&spec.method);
-    let body = msg.payload.clone();
+    let body = Bytes::copy_from_slice(&msg.payload);
     let mut headers: Vec<(String, String)> = spec
         .headers
         .iter()
+        .filter(|(k, _)| {
+            broker_partition::http_delivery::is_valid_header_name(k)
+                && !broker_partition::http_delivery::is_denied_outbound_header(k)
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -49,7 +55,11 @@ pub fn build_outbound_with_spec(msg: &StoredMessage, spec: &HttpDeliverySpec) ->
 }
 
 fn parse_method(s: &str) -> Method {
-    Method::from_str(s).unwrap_or(Method::POST)
+    let m = s.trim().to_ascii_uppercase();
+    if !broker_partition::http_delivery::is_allowed_http_method(&m) {
+        return Method::POST;
+    }
+    Method::from_str(&m).unwrap_or(Method::POST)
 }
 
 pub fn apply_to_reqwest(

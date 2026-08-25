@@ -15,6 +15,14 @@ pub fn inline_max_bytes() -> usize {
         .unwrap_or(256 * 1024)
 }
 
+/// Hard cap for externally stored payloads, including streaming uploads.
+pub fn max_blob_bytes() -> u64 {
+    std::env::var("BETTERMQ_MAX_PAYLOAD_BLOB_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256 * 1024 * 1024)
+}
+
 #[derive(Clone)]
 pub enum BlobStore {
     Fs(FsBlobStore),
@@ -40,10 +48,37 @@ impl BlobStore {
         message_id: Uuid,
         data: &[u8],
     ) -> Result<PayloadRef, PayloadError> {
+        let limit = max_blob_bytes();
+        if data.len() as u64 > limit {
+            return Err(PayloadError::TooLarge {
+                size: data.len() as u64,
+                limit,
+            });
+        }
         match self {
             Self::Fs(fs) => fs.put_blob(tenant_id, message_id, data),
             #[cfg(feature = "s3")]
             Self::S3(s3) => s3.put_blob(tenant_id, message_id, data),
+        }
+    }
+
+    pub fn put_blob_owned(
+        &self,
+        tenant_id: &str,
+        message_id: Uuid,
+        data: Vec<u8>,
+    ) -> Result<PayloadRef, PayloadError> {
+        let limit = max_blob_bytes();
+        if data.len() as u64 > limit {
+            return Err(PayloadError::TooLarge {
+                size: data.len() as u64,
+                limit,
+            });
+        }
+        match self {
+            Self::Fs(fs) => fs.put_blob_reader(tenant_id, message_id, std::io::Cursor::new(data)),
+            #[cfg(feature = "s3")]
+            Self::S3(s3) => s3.put_blob_owned(tenant_id, message_id, data),
         }
     }
 
@@ -52,6 +87,18 @@ impl BlobStore {
             Self::Fs(fs) => fs.get_blob(reference),
             #[cfg(feature = "s3")]
             Self::S3(s3) => s3.get_blob(reference),
+        }
+    }
+
+    pub fn get_blob_to_writer<W: std::io::Write + Unpin>(
+        &self,
+        reference: &PayloadRef,
+        writer: &mut W,
+    ) -> Result<u64, PayloadError> {
+        match self {
+            Self::Fs(fs) => fs.get_blob_to_writer(reference, writer),
+            #[cfg(feature = "s3")]
+            Self::S3(s3) => s3.get_blob_to_writer(reference, writer),
         }
     }
 }
@@ -67,7 +114,7 @@ pub fn prepare_for_log(
     if payload.len() <= inline_max {
         return Ok((payload, None));
     }
-    let reference = store.put_blob(tenant_id, message_id, &payload)?;
+    let reference = store.put_blob_owned(tenant_id, message_id, payload)?;
     let json = serde_json::to_string(&reference).map_err(|e| PayloadError::Store(e.to_string()))?;
     Ok((Vec::new(), Some(json)))
 }

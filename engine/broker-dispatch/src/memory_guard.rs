@@ -2,6 +2,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct MemoryGuardConfig {
@@ -29,6 +31,8 @@ pub struct ProcessResourceStats {
 #[derive(Default)]
 pub struct MemoryGuard {
     critical: AtomicBool,
+    stop: AtomicBool,
+    stop_notify: Notify,
     cfg: MemoryGuardConfig,
 }
 
@@ -36,19 +40,39 @@ impl MemoryGuard {
     pub fn new(cfg: MemoryGuardConfig) -> Self {
         Self {
             critical: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            stop_notify: Notify::new(),
             cfg,
         }
     }
 
-    pub fn spawn_monitor(self: &std::sync::Arc<Self>) {
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.stop_notify.notify_waiters();
+    }
+
+    /// Sample RSS while a memory limit is configured. Returns `None` when there is
+    /// nothing to monitor so shutdown does not have a leftover `Interval`.
+    pub fn spawn_monitor(self: &std::sync::Arc<Self>) -> Option<JoinHandle<()>> {
+        self.cfg.limit_mb?;
         let guard = std::sync::Arc::clone(self);
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
-                interval.tick().await;
-                guard.sample();
+                if guard.stop.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::select! {
+                    _ = guard.stop_notify.notified() => break,
+                    _ = interval.tick() => {
+                        if guard.stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        guard.sample();
+                    }
+                }
             }
-        });
+        }))
     }
 
     fn sample(&self) {
@@ -90,9 +114,16 @@ impl MemoryGuard {
         }
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
-            interval.tick().await;
-            if !self.critical.load(Ordering::SeqCst) {
+            if self.stop.load(Ordering::Acquire) {
                 return;
+            }
+            tokio::select! {
+                _ = self.stop_notify.notified() => return,
+                _ = interval.tick() => {
+                    if !self.critical.load(Ordering::SeqCst) {
+                        return;
+                    }
+                }
             }
         }
     }

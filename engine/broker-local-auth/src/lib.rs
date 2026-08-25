@@ -104,6 +104,11 @@ impl LocalAuthStore {
         Ok(constant_time_eq(&hash_token(token), &stored.api_key_hash))
     }
 
+    /// Admin operations use the same local API token as the data plane.
+    pub fn authorize_admin(&self, token: &str) -> bool {
+        self.verify_token(token).unwrap_or(false)
+    }
+
     pub fn export_credentials(&self) -> Result<Option<AuthCredentials>, LocalAuthError> {
         if !self.is_configured() {
             return Ok(None);
@@ -152,7 +157,7 @@ impl LocalAuthStore {
 }
 
 fn validate_password(password: &str) -> Result<(), LocalAuthError> {
-    if password.len() < 8 {
+    if password.len() < 12 {
         return Err(LocalAuthError::InvalidPassword);
     }
     Ok(())
@@ -234,7 +239,7 @@ mod tests {
     fn setup_and_verify() {
         let dir = tempdir().unwrap();
         let store = LocalAuthStore::open(dir.path()).unwrap();
-        let token = store.setup("password123").unwrap();
+        let token = store.setup("password1234").unwrap();
         assert!(token.starts_with(TOKEN_PREFIX));
         assert!(store.verify_token(&token).unwrap());
         assert!(!store.verify_token("sk_local_deadbeef").unwrap());
@@ -244,8 +249,8 @@ mod tests {
     fn regenerate_rotates_token() {
         let dir = tempdir().unwrap();
         let store = LocalAuthStore::open(dir.path()).unwrap();
-        let t1 = store.setup("password123").unwrap();
-        let t2 = store.regenerate("password123").unwrap();
+        let t1 = store.setup("password1234").unwrap();
+        let t2 = store.regenerate("password1234").unwrap();
         assert_ne!(t1, t2);
         assert!(!store.verify_token(&t1).unwrap());
         assert!(store.verify_token(&t2).unwrap());

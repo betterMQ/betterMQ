@@ -18,6 +18,7 @@ fn three_node_runtime(this: usize) -> (ClusterRuntime, Vec<Uuid>) {
         nodes,
         node_id: ids[this],
         generation: 1,
+        hash_version: 1,
     };
     (ClusterRuntime::from_config_only(cfg), ids)
 }
@@ -25,7 +26,14 @@ fn three_node_runtime(this: usize) -> (ClusterRuntime, Vec<Uuid>) {
 #[test]
 fn all_healthy_keeps_static_shard_owners() {
     let (rt0, ids) = three_node_runtime(0);
-    let (rt1, _) = three_node_runtime(1);
+    let cfg1 = ClusterConfig {
+        cluster_id: rt0.config().cluster_id,
+        nodes: rt0.config().nodes.clone(),
+        node_id: ids[1],
+        generation: 1,
+        hash_version: 1,
+    };
+    let rt1 = ClusterRuntime::from_config_only(cfg1);
     let now = chrono::Utc::now().timestamp_millis();
     for rt in [&rt0, &rt1] {
         rt.record_self_alive(now);
@@ -50,11 +58,11 @@ fn broker1_down_shard1_moves_to_broker2() {
 }
 
 #[test]
-fn sole_survivor_leads_all_shards() {
-    let (rt, ids) = three_node_runtime(2);
+fn isolated_node_does_not_lead() {
+    let (rt, _ids) = three_node_runtime(2);
     let now = chrono::Utc::now().timestamp_millis();
     rt.record_self_alive(now);
     for shard in 0..4 {
-        assert_eq!(rt.elect_leader_for_shard(shard), Some(ids[2]));
+        assert_eq!(rt.elect_leader_for_shard(shard), None);
     }
 }

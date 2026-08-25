@@ -12,7 +12,36 @@ use axum::{
 use axum::{http::StatusCode, response::IntoResponse, Json};
 #[cfg(feature = "cloud")]
 use http::header::CONTENT_LENGTH;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+fn token_cache() -> &'static Mutex<HashMap<String, (Instant, bool)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, bool)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_local_token(
+    local: &broker_local_auth::LocalAuthStore,
+    token: &str,
+) -> Result<bool, ApiError> {
+    let now = Instant::now();
+    {
+        let cache = token_cache().lock();
+        if let Some((until, ok)) = cache.get(token) {
+            if *until > now {
+                return Ok(*ok);
+            }
+        }
+    }
+    let ok = local.verify_token(token).map_err(local_auth_to_api)?;
+    token_cache()
+        .lock()
+        .insert(token.to_string(), (now + Duration::from_secs(5), ok));
+    Ok(ok)
+}
 
 pub async fn require_api_key(
     State(state): State<Arc<AppState>>,
@@ -39,20 +68,42 @@ pub async fn require_api_key(
         return Ok(broker_partition::scope_tenant(tenant, next.run(req)).await);
     }
 
+    if insecure_no_auth() {
+        return Ok(next.run(req).await);
+    }
+
     if let Some(local) = &state.local_auth {
         if !local.is_configured() {
-            return Err(ApiError::BadRequest(
+            return Err(ApiError::Unauthorized(
                 "local auth not configured — open /panel/ to set a password and API token".into(),
             ));
         }
         let token = bearer_token(&req)
-            .ok_or_else(|| ApiError::BadRequest("missing Authorization: Bearer token".into()))?;
-        if !local.verify_token(token).map_err(local_auth_to_api)? {
-            return Err(ApiError::BadRequest("invalid API token".into()));
+            .ok_or_else(|| ApiError::Unauthorized("missing Authorization: Bearer token".into()))?;
+        if !cached_local_token(local, token)? {
+            return Err(ApiError::Unauthorized("invalid API token".into()));
         }
+        return Ok(next.run(req).await);
     }
 
-    Ok(next.run(req).await)
+    if state.uses_cloud_auth() {
+        return Ok(next.run(req).await);
+    }
+
+    Err(ApiError::Unauthorized(
+        "authentication required (set BETTERMQ_INSECURE_NO_AUTH=1 only for local development)"
+            .into(),
+    ))
+}
+
+pub(crate) fn insecure_no_auth() -> bool {
+    matches!(
+        std::env::var("BETTERMQ_INSECURE_NO_AUTH")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
 }
 
 fn bearer_token(req: &Request) -> Option<&str> {
@@ -79,7 +130,7 @@ fn local_auth_to_api(e: broker_local_auth::LocalAuthError) -> ApiError {
 fn auth_to_api(e: broker_control_plane::AuthError) -> ApiError {
     match e {
         broker_control_plane::AuthError::Missing | broker_control_plane::AuthError::Invalid => {
-            ApiError::BadRequest(e.to_string())
+            ApiError::Unauthorized(e.to_string())
         }
         broker_control_plane::AuthError::Db(err) => {
             ApiError::Broker(broker_partition::BrokerError::Storage(

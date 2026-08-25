@@ -7,6 +7,8 @@ use crate::ScheduledPublishRequest;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -94,13 +96,55 @@ impl CronJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CronFile {
+    #[serde(default)]
+    version: u16,
+    #[serde(default)]
+    sequence: u64,
     jobs: Vec<CronJob>,
 }
 
 #[derive(Clone)]
 pub struct CronRegistry {
     path: PathBuf,
-    inner: Arc<parking_lot::Mutex<CronFile>>,
+    journal_path: PathBuf,
+    inner: Arc<parking_lot::Mutex<CronState>>,
+}
+
+struct CronState {
+    file: CronFile,
+    sequence: u64,
+    journal_ops: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // Persisted commands are infrequent and mirror the snapshot schema.
+enum CronCommand {
+    Upsert { job: CronJob },
+    Delete { id: Uuid },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CronJournalRecord {
+    version: u16,
+    sequence: u64,
+    command: CronCommand,
+}
+
+const CRON_JOURNAL_VERSION: u16 = 1;
+const CRON_COMPACT_OPS: usize = 1024;
+
+fn apply_command(file: &mut CronFile, command: CronCommand) {
+    match command {
+        CronCommand::Upsert { job } => {
+            if let Some(slot) = file.jobs.iter_mut().find(|existing| existing.id == job.id) {
+                *slot = job;
+            } else {
+                file.jobs.push(job);
+            }
+        }
+        CronCommand::Delete { id } => file.jobs.retain(|job| job.id != id),
+    }
 }
 
 fn meta_file_path(data_dir: &Path, name: &str) -> PathBuf {
@@ -115,7 +159,12 @@ fn meta_file_path(data_dir: &Path, name: &str) -> PathBuf {
 impl CronRegistry {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, CronError> {
         let path = meta_file_path(data_dir.as_ref(), "crons.json");
-        let loaded = load_json_with_recovery(&path, || CronFile { jobs: Vec::new() })?;
+        let journal_path = path.with_extension("journal");
+        let mut loaded = load_json_with_recovery(&path, || CronFile {
+            version: CRON_JOURNAL_VERSION,
+            sequence: 0,
+            jobs: Vec::new(),
+        })?;
         if !matches!(
             loaded.source,
             JsonLoadSource::Main | JsonLoadSource::Missing
@@ -127,9 +176,53 @@ impl CronRegistry {
                 "cron registry recovered after metadata read failure"
             );
         }
+        if loaded.value.version != 0 && loaded.value.version != CRON_JOURNAL_VERSION {
+            return Err(CronError::InvalidSchedule(format!(
+                "unsupported cron snapshot version {}",
+                loaded.value.version
+            )));
+        }
+        loaded.value.version = CRON_JOURNAL_VERSION;
+        let mut sequence = loaded.value.sequence;
+        let mut journal_ops = 0usize;
+        if journal_path.exists() {
+            let bytes = std::fs::read(&journal_path)?;
+            let lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
+            for (index, line) in lines.iter().enumerate() {
+                if line.iter().all(|b| b.is_ascii_whitespace()) {
+                    continue;
+                }
+                let record = match serde_json::from_slice::<CronJournalRecord>(line) {
+                    Ok(record) => record,
+                    Err(error) if index + 1 == lines.len() => {
+                        tracing::warn!(%error, "ignoring torn cron journal tail");
+                        break;
+                    }
+                    Err(error) => return Err(CronError::Serde(error)),
+                };
+                if record.version != CRON_JOURNAL_VERSION {
+                    return Err(CronError::InvalidSchedule(format!(
+                        "unsupported cron journal version {}",
+                        record.version
+                    )));
+                }
+                if record.sequence <= sequence {
+                    continue;
+                }
+                sequence = sequence.max(record.sequence);
+                journal_ops += 1;
+                apply_command(&mut loaded.value, record.command);
+            }
+        }
+        loaded.value.sequence = sequence;
         Ok(Self {
             path,
-            inner: Arc::new(parking_lot::Mutex::new(loaded.value)),
+            journal_path,
+            inner: Arc::new(parking_lot::Mutex::new(CronState {
+                file: loaded.value,
+                sequence,
+                journal_ops,
+            })),
         })
     }
 
@@ -149,8 +242,7 @@ impl CronRegistry {
         let now = Utc::now().timestamp_millis();
         let (cron, every_seconds) = match &kind {
             ScheduleKind::Cron { cron } => {
-                let normalized = normalize_cron(cron);
-                parse_schedule(&normalized)?;
+                parse_schedule(&cron_fields_for_parser(cron)?)?;
                 (cron.clone(), None)
             }
             ScheduleKind::Interval { every_seconds } => {
@@ -173,16 +265,18 @@ impl CronRegistry {
             request,
         };
 
-        let mut file = self.inner.lock();
-        file.jobs.push(job.clone());
-        drop(file);
-        self.persist()?;
+        let mut state = self.inner.lock();
+        self.append_command(&mut state, CronCommand::Upsert { job: job.clone() })?;
+        apply_command(&mut state.file, CronCommand::Upsert { job: job.clone() });
+        self.maybe_compact(&mut state);
         Ok(job)
     }
 
     pub fn get(&self, id: Uuid) -> Result<CronJob, CronError> {
-        let file = self.inner.lock();
-        file.jobs
+        let state = self.inner.lock();
+        state
+            .file
+            .jobs
             .iter()
             .find(|j| j.id == id)
             .cloned()
@@ -190,7 +284,7 @@ impl CronRegistry {
     }
 
     pub fn list(&self) -> Vec<CronJob> {
-        self.inner.lock().jobs.clone()
+        self.inner.lock().file.jobs.clone()
     }
 
     pub fn pause(&self, id: Uuid) -> Result<CronJob, CronError> {
@@ -205,15 +299,17 @@ impl CronRegistry {
     }
 
     pub fn delete(&self, id: Uuid) -> Result<CronJob, CronError> {
-        let mut file = self.inner.lock();
-        let pos = file
+        let mut state = self.inner.lock();
+        let pos = state
+            .file
             .jobs
             .iter()
             .position(|j| j.id == id)
             .ok_or(CronError::NotFound(id))?;
-        let removed = file.jobs.remove(pos);
-        drop(file);
-        self.persist()?;
+        let removed = state.file.jobs[pos].clone();
+        self.append_command(&mut state, CronCommand::Delete { id })?;
+        apply_command(&mut state.file, CronCommand::Delete { id });
+        self.maybe_compact(&mut state);
         Ok(removed)
     }
 
@@ -222,25 +318,24 @@ impl CronRegistry {
         if job.updated_at_ms == 0 {
             job.updated_at_ms = Utc::now().timestamp_millis();
         }
-        let mut file = self.inner.lock();
-        if let Some(pos) = file.jobs.iter().position(|j| j.id == job.id) {
-            if file.jobs[pos].updated_at_ms > job.updated_at_ms {
+        let mut state = self.inner.lock();
+        if let Some(pos) = state.file.jobs.iter().position(|j| j.id == job.id) {
+            if state.file.jobs[pos].updated_at_ms > job.updated_at_ms {
                 return Ok(());
             }
-            file.jobs[pos] = job;
-        } else {
-            file.jobs.push(job);
         }
-        drop(file);
-        self.persist()
+        self.append_command(&mut state, CronCommand::Upsert { job: job.clone() })?;
+        apply_command(&mut state.file, CronCommand::Upsert { job });
+        self.maybe_compact(&mut state);
+        Ok(())
     }
 
     /// Jobs due now — advances next_run only in memory. Call [`Self::commit_fire`]
     /// after successful publish, or [`Self::revert_fire`] on failure.
     pub fn pop_due(&self, now_ms: i64) -> Vec<CronJob> {
-        let mut file = self.inner.lock();
+        let mut state = self.inner.lock();
         let mut due = Vec::new();
-        for job in &mut file.jobs {
+        for job in &mut state.file.jobs {
             if job.paused || job.next_run_at_ms > now_ms {
                 continue;
             }
@@ -260,55 +355,118 @@ impl CronRegistry {
 
     /// Persist advanced next_run after a successful cron publish.
     pub fn commit_fire(&self, id: Uuid) -> Result<(), CronError> {
-        // State already advanced in pop_due; persist current registry.
-        let _ = id;
-        self.persist()
+        let mut state = self.inner.lock();
+        let job = state
+            .file
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .cloned()
+            .ok_or(CronError::NotFound(id))?;
+        self.append_command(&mut state, CronCommand::Upsert { job })?;
+        self.maybe_compact(&mut state);
+        Ok(())
     }
 
     /// Revert next_run after a failed publish so the tick retries.
     pub fn revert_fire(&self, job: &CronJob) -> Result<(), CronError> {
-        let mut file = self.inner.lock();
-        if let Some(slot) = file.jobs.iter_mut().find(|j| j.id == job.id) {
-            slot.next_run_at_ms = job.next_run_at_ms;
-            slot.last_run_at_ms = job.last_run_at_ms;
-        }
-        drop(file);
-        self.persist()
+        let mut state = self.inner.lock();
+        let mut restored = state
+            .file
+            .jobs
+            .iter()
+            .find(|existing| existing.id == job.id)
+            .cloned()
+            .ok_or(CronError::NotFound(job.id))?;
+        restored.next_run_at_ms = job.next_run_at_ms;
+        restored.last_run_at_ms = job.last_run_at_ms;
+        self.append_command(
+            &mut state,
+            CronCommand::Upsert {
+                job: restored.clone(),
+            },
+        )?;
+        apply_command(&mut state.file, CronCommand::Upsert { job: restored });
+        self.maybe_compact(&mut state);
+        Ok(())
     }
 
     fn set_paused(&self, id: Uuid, paused: bool) -> Result<CronJob, CronError> {
-        let mut file = self.inner.lock();
-        let job = file
+        let mut state = self.inner.lock();
+        let mut job = state
+            .file
             .jobs
-            .iter_mut()
+            .iter()
             .find(|j| j.id == id)
+            .cloned()
             .ok_or(CronError::NotFound(id))?;
         job.paused = paused;
         let out = job.clone();
-        drop(file);
-        self.persist()?;
+        self.append_command(&mut state, CronCommand::Upsert { job: job.clone() })?;
+        apply_command(&mut state.file, CronCommand::Upsert { job });
+        self.maybe_compact(&mut state);
         Ok(out)
     }
 
     fn update_next_run(&self, id: Uuid, next_run_at_ms: i64) -> Result<CronJob, CronError> {
-        let mut file = self.inner.lock();
-        let job = file
+        let mut state = self.inner.lock();
+        let mut job = state
+            .file
             .jobs
-            .iter_mut()
+            .iter()
             .find(|j| j.id == id)
+            .cloned()
             .ok_or(CronError::NotFound(id))?;
         job.next_run_at_ms = next_run_at_ms;
         let out = job.clone();
-        drop(file);
-        self.persist()?;
+        self.append_command(&mut state, CronCommand::Upsert { job: job.clone() })?;
+        apply_command(&mut state.file, CronCommand::Upsert { job });
+        self.maybe_compact(&mut state);
         Ok(out)
     }
 
-    fn persist(&self) -> Result<(), CronError> {
-        let file = self.inner.lock();
-        let bytes = serde_json::to_vec_pretty(&*file)?;
-        drop(file);
-        persist_json_atomic(&self.path, &bytes).map_err(CronError::from)
+    fn append_command(&self, state: &mut CronState, command: CronCommand) -> Result<(), CronError> {
+        let sequence = state.sequence.saturating_add(1);
+        let record = CronJournalRecord {
+            version: CRON_JOURNAL_VERSION,
+            sequence,
+            command,
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal_path)?;
+        serde_json::to_writer(&mut file, &record)?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        broker_storage::set_secret_file_mode(&self.journal_path);
+        state.sequence = sequence;
+        state.file.sequence = sequence;
+        state.journal_ops += 1;
+        Ok(())
+    }
+
+    fn maybe_compact(&self, state: &mut CronState) {
+        if state.journal_ops < CRON_COMPACT_OPS {
+            return;
+        }
+        let Ok(bytes) = serde_json::to_vec_pretty(&state.file) else {
+            return;
+        };
+        if persist_json_atomic(&self.path, &bytes).is_err() {
+            return;
+        }
+        broker_storage::set_secret_file_mode(&self.path);
+        match OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.journal_path)
+            .and_then(|file| file.sync_data())
+        {
+            Ok(()) => state.journal_ops = 0,
+            Err(error) => tracing::warn!(%error, "cron journal compaction failed"),
+        }
     }
 }
 
@@ -324,8 +482,52 @@ fn next_run_for_job(
     next_run_after_cron(cron, after_ms)
 }
 
+/// Split an optional `CRON_TZ=` / `TZ=` prefix from a crontab expression.
+/// Default timezone is UTC.
+fn split_cron_timezone(expr: &str) -> Result<(chrono_tz::Tz, &str), CronError> {
+    let expr = expr.trim();
+    let rest = if let Some(rest) = expr
+        .strip_prefix("CRON_TZ=")
+        .or_else(|| expr.strip_prefix("cron_tz="))
+    {
+        rest
+    } else if let Some(rest) = expr
+        .strip_prefix("TZ=")
+        .or_else(|| expr.strip_prefix("tz="))
+    {
+        rest
+    } else {
+        return Ok((chrono_tz::Tz::UTC, expr));
+    };
+    let (name, fields) = rest.split_once(char::is_whitespace).ok_or_else(|| {
+        CronError::InvalidExpression(
+            "CRON_TZ requires a timezone and a cron expression, e.g. CRON_TZ=America/New_York */5 * * * *".into(),
+        )
+    })?;
+    let tz = name.parse::<chrono_tz::Tz>().map_err(|_| {
+        CronError::InvalidExpression(format!(
+            "unknown timezone {name}; use an IANA name like America/New_York (default is UTC)"
+        ))
+    })?;
+    let fields = fields.trim();
+    if fields.is_empty() {
+        return Err(CronError::InvalidExpression(
+            "cron expression missing after timezone".into(),
+        ));
+    }
+    Ok((tz, fields))
+}
+
 /// Accept 5-field (`min hour dom month dow`) or 6-field (`sec min hour dom month dow`) cron.
+/// Strips an optional `CRON_TZ=` prefix first.
 pub fn normalize_cron(expr: &str) -> String {
+    let fields = split_cron_timezone(expr)
+        .map(|(_, fields)| fields.to_string())
+        .unwrap_or_else(|_| expr.trim().to_string());
+    normalize_cron_fields(&fields)
+}
+
+fn normalize_cron_fields(expr: &str) -> String {
     let parts: Vec<&str> = expr.split_whitespace().collect();
     match parts.len() {
         5 => format!(
@@ -336,18 +538,25 @@ pub fn normalize_cron(expr: &str) -> String {
     }
 }
 
+fn cron_fields_for_parser(expr: &str) -> Result<String, CronError> {
+    let (_, fields) = split_cron_timezone(expr)?;
+    Ok(normalize_cron_fields(fields))
+}
+
 fn parse_schedule(expr: &str) -> Result<Schedule, CronError> {
     Schedule::from_str(expr).map_err(|e| CronError::InvalidExpression(e.to_string()))
 }
 
 fn next_run_after_cron(expr: &str, after_ms: i64) -> Result<i64, CronError> {
-    let normalized = normalize_cron(expr);
-    let schedule = parse_schedule(&normalized)?;
-    let after: DateTime<Utc> = DateTime::from_timestamp_millis(after_ms).unwrap_or_else(Utc::now);
+    let (tz, fields) = split_cron_timezone(expr)?;
+    let schedule = parse_schedule(&normalize_cron_fields(fields))?;
+    let after_utc: DateTime<Utc> =
+        DateTime::from_timestamp_millis(after_ms).unwrap_or_else(Utc::now);
+    let after_local = after_utc.with_timezone(&tz);
     schedule
-        .after(&after)
+        .after(&after_local)
         .next()
-        .map(|dt| dt.timestamp_millis())
+        .map(|dt| dt.with_timezone(&Utc).timestamp_millis())
         .ok_or_else(|| CronError::InvalidExpression("no upcoming run".into()))
 }
 
@@ -376,6 +585,42 @@ mod tests {
             sign: None,
             request: None,
         }
+    }
+
+    #[test]
+    fn cron_tz_prefix_shifts_next_run() {
+        let after = chrono::DateTime::parse_from_rfc3339("2024-01-15T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let utc = next_run_after_cron("0 9 * * *", after).unwrap();
+        assert_eq!(
+            utc,
+            chrono::DateTime::parse_from_rfc3339("2024-01-16T09:00:00Z")
+                .unwrap()
+                .timestamp_millis()
+        );
+        let ny = next_run_after_cron("CRON_TZ=America/New_York 0 9 * * *", after).unwrap();
+        assert_eq!(
+            ny,
+            chrono::DateTime::parse_from_rfc3339("2024-01-15T14:00:00Z")
+                .unwrap()
+                .timestamp_millis(),
+            "09:00 EST is 14:00 UTC in January"
+        );
+    }
+
+    #[test]
+    fn unknown_cron_timezone_is_rejected() {
+        assert!(next_run_after_cron("CRON_TZ=Not/AZone */5 * * * *", 0).is_err());
+    }
+
+    #[test]
+    fn normalize_cron_strips_timezone_prefix() {
+        assert_eq!(
+            normalize_cron("CRON_TZ=America/New_York */5 * * * *"),
+            "0 */5 * * * *"
+        );
+        assert_eq!(normalize_cron("*/5 * * * *"), "0 */5 * * * *");
     }
 
     #[test]
@@ -413,5 +658,45 @@ mod tests {
         assert_eq!(due.len(), 1);
         let updated = reg.get(job.id).unwrap();
         assert_eq!(updated.next_run_at_ms, now + 20_000);
+    }
+
+    #[test]
+    fn journal_replays_committed_fire_after_restart() {
+        let dir = temp_dir().join(format!("bettermq-cron-restart-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = CronRegistry::open(&dir).unwrap();
+        let job = reg
+            .create_with_kind(
+                ScheduleKind::Interval { every_seconds: 10 },
+                sample_request(),
+            )
+            .unwrap();
+        let due = reg.pop_due(job.created_at_ms + 10_000);
+        assert_eq!(due.len(), 1);
+        reg.commit_fire(job.id).unwrap();
+        drop(reg);
+
+        let reopened = CronRegistry::open(&dir).unwrap();
+        let restored = reopened.get(job.id).unwrap();
+        assert_eq!(restored.next_run_at_ms, job.created_at_ms + 20_000);
+        assert_eq!(restored.last_run_at_ms, Some(job.created_at_ms + 10_000));
+        assert!(dir.join("crons.journal").exists());
+    }
+
+    #[test]
+    fn unsupported_journal_version_fails_closed() {
+        let dir = temp_dir().join(format!("bettermq-cron-version-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("crons.json"), br#"{"jobs":[]}"#).unwrap();
+        std::fs::write(
+            dir.join("crons.journal"),
+            br#"{"version":99,"sequence":1,"command":{"command":"delete","id":"00000000-0000-0000-0000-000000000000"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            CronRegistry::open(&dir),
+            Err(CronError::InvalidSchedule(message))
+                if message.contains("unsupported cron journal version")
+        ));
     }
 }

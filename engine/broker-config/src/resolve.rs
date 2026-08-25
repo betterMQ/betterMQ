@@ -1,3 +1,7 @@
+use crate::components::{
+    resolve_component_set, resolve_listeners, resolve_panel_mode, Component, ComponentSet,
+    PanelMode, ReplicationPolicyConfig, ResolvedListeners,
+};
 use crate::types::{
     parse_listen, AuthConfig, BetterMqConfig, ConfigError, S3Config, StorageConfig,
 };
@@ -16,7 +20,15 @@ pub struct ServeOverrides {
     pub database_url: Option<String>,
     pub dispatch_fleet: Option<bool>,
     pub broker_only: Option<bool>,
+    pub gateway_only: Option<bool>,
     pub panel_listen: Option<SocketAddr>,
+    pub admin_listen: Option<SocketAddr>,
+    pub internal_listen: Option<SocketAddr>,
+    pub profile: Option<String>,
+    pub components: Vec<String>,
+    pub no_panel: bool,
+    pub standalone_panel: bool,
+    pub controller_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,7 +45,20 @@ pub struct ResolvedServeSettings {
     pub dispatch_retry: broker_proto::RetryDefaults,
     pub dispatch_fleet: bool,
     pub broker_only: bool,
+    pub gateway_only: bool,
     pub panel_listen: Option<SocketAddr>,
+    pub components: ComponentSet,
+    pub panel_mode: PanelMode,
+    pub listeners: ResolvedListeners,
+    pub replication: ReplicationPolicyConfig,
+    pub controller_url: Option<String>,
+    pub opens_local_storage: bool,
+}
+
+impl ResolvedServeSettings {
+    pub fn has(&self, component: Component) -> bool {
+        self.components.contains(component)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +76,7 @@ pub enum ResolvedAuth {
 impl ResolvedServeSettings {
     /// Set process env vars consumed by existing broker crates (backward compatible).
     pub fn apply_env(&self) {
+        std::env::set_var("BETTERMQ_DATA_DIR", &self.data_dir);
         let storage = match self.storage {
             StorageMode::Local => "local",
             StorageMode::Slate => "slate",
@@ -137,6 +163,66 @@ pub fn resolve_serve(
         .as_ref()
         .and_then(|c| c.shared_meta_dir.clone());
 
+    let components = resolve_component_set(
+        &base,
+        overrides.profile.as_deref(),
+        &overrides.components,
+        overrides.broker_only.unwrap_or(false),
+        overrides.gateway_only.unwrap_or(false),
+        overrides.dispatch_fleet.unwrap_or(false),
+        overrides.standalone_panel,
+    )?;
+    let panel_mode = resolve_panel_mode(
+        &base,
+        overrides.panel_listen,
+        overrides.no_panel,
+        overrides.standalone_panel,
+    )?;
+    let mut panel_listen = overrides.panel_listen.or_else(|| {
+        base.panel
+            .as_ref()
+            .and_then(|section| section.listen.as_deref())
+            .and_then(|value| parse_listen(value).ok())
+    });
+    if panel_mode == PanelMode::Disabled {
+        panel_listen = None;
+    }
+    let admin_listen = overrides.admin_listen.or_else(|| {
+        base.listeners
+            .as_ref()
+            .and_then(|section| section.admin.as_deref())
+            .and_then(|value| parse_listen(value).ok())
+    });
+    let internal_listen = overrides.internal_listen.or_else(|| {
+        base.listeners
+            .as_ref()
+            .and_then(|section| section.internal.as_deref())
+            .and_then(|value| parse_listen(value).ok())
+    });
+    let listeners = resolve_listeners(
+        listen,
+        admin_listen,
+        internal_listen,
+        panel_listen,
+        panel_mode,
+    );
+    listeners.validate_exposure(components)?;
+    let replication = base.replication.clone().unwrap_or_else(|| {
+        if cluster_enabled {
+            ReplicationPolicyConfig::default()
+        } else {
+            ReplicationPolicyConfig {
+                factor: 1,
+                min_isr: 1,
+            }
+        }
+    });
+    let controller_url = overrides.controller_url.clone().or_else(|| {
+        base.panel
+            .as_ref()
+            .and_then(|section| section.controller.clone())
+    });
+
     Ok(ResolvedServeSettings {
         listen,
         data_dir,
@@ -148,9 +234,21 @@ pub fn resolve_serve(
         dispatch_http_timeout_secs: base.dispatch.http_timeout_secs,
         dispatch_long_http_timeout_secs: base.dispatch.long_http_timeout_secs,
         dispatch_retry: base.dispatch.retry.clone(),
-        dispatch_fleet: overrides.dispatch_fleet.unwrap_or(false),
-        broker_only: overrides.broker_only.unwrap_or(false),
-        panel_listen: overrides.panel_listen,
+        dispatch_fleet: overrides.dispatch_fleet.unwrap_or(false)
+            || (components.contains(Component::Dispatch)
+                && !components.contains(Component::Broker)),
+        broker_only: overrides.broker_only.unwrap_or(false)
+            || (components.contains(Component::Broker)
+                && !components.contains(Component::Dispatch)),
+        gateway_only: overrides.gateway_only.unwrap_or(false)
+            || (components.contains(Component::Gateway) && !components.contains(Component::Broker)),
+        panel_listen,
+        components,
+        panel_mode,
+        listeners,
+        replication,
+        controller_url,
+        opens_local_storage: components.requires_local_storage(),
     })
 }
 
@@ -160,4 +258,61 @@ pub fn resolve_from_path(
 ) -> Result<ResolvedServeSettings, ConfigError> {
     let cfg = crate::file::load_config(path)?;
     resolve_serve(Some(&cfg), overrides)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::{Component, PanelMode};
+
+    #[test]
+    fn default_serve_opens_storage_with_embedded_panel() {
+        let settings = resolve_serve(None, &ServeOverrides::default()).unwrap();
+        assert!(settings.opens_local_storage);
+        assert_eq!(settings.panel_mode, PanelMode::Embedded);
+        assert!(settings.has(Component::Broker));
+        assert!(settings.has(Component::Panel));
+        assert_eq!(settings.replication.factor, 1);
+    }
+
+    #[test]
+    fn panel_and_gateway_profiles_do_not_open_storage() {
+        let panel = resolve_serve(
+            None,
+            &ServeOverrides {
+                standalone_panel: true,
+                ..ServeOverrides::default()
+            },
+        )
+        .unwrap();
+        assert!(!panel.opens_local_storage);
+        assert_eq!(panel.panel_mode, PanelMode::Standalone);
+
+        let gateway = resolve_serve(
+            None,
+            &ServeOverrides {
+                gateway_only: Some(true),
+                ..ServeOverrides::default()
+            },
+        )
+        .unwrap();
+        assert!(!gateway.opens_local_storage);
+        assert!(gateway.gateway_only);
+    }
+
+    #[test]
+    fn cluster_defaults_to_rf3() {
+        let mut cfg = crate::types::BetterMqConfig::template_cluster_local();
+        cfg.cluster.as_mut().unwrap().nodes.truncate(3);
+        let settings = resolve_serve(
+            Some(&cfg),
+            &ServeOverrides {
+                cluster: Some(true),
+                ..ServeOverrides::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(settings.replication.factor, 3);
+        assert_eq!(settings.replication.min_isr, 2);
+    }
 }
