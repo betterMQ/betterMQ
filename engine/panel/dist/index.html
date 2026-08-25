@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/panel/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BetterMQ</title>
+    <script>
+      (() => {
+        const stored = localStorage.getItem("themeMode");
+        const mode = stored === "dark" || stored === "light" || stored === "system" ? stored : "system";
+        const dark =
+          mode === "dark" ||
+          (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+        document.documentElement.dataset.themeMode = mode;
+      })();
+    </script>
+    <script src="/panel/panel-config.js"></script>
+    <script type="module" crossorigin src="/panel/assets/index-D4tvSxvQ.js"></script>
+    <link rel="modulepreload" crossorigin href="/panel/assets/utils-CK_khZkI.js">
+    <link rel="modulepreload" crossorigin href="/panel/assets/Field-CltneCdg.js">
+    <link rel="modulepreload" crossorigin href="/panel/assets/createLucideIcon-4p_GFzVn.js">
+    <link rel="modulepreload" crossorigin href="/panel/assets/x-BeJT45BT.js">
+    <link rel="modulepreload" crossorigin href="/panel/assets/api-BaWJLFti.js">
+    <link rel="modulepreload" crossorigin href="/panel/assets/catalog-BXmWs5L4.js">
+    <link rel="stylesheet" crossorigin href="/panel/assets/index-DSm6B2Iy.css">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>

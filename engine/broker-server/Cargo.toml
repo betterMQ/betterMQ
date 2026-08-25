@@ -33,16 +33,18 @@ broker-storage = { workspace = true, features = ["slate"] }
 broker-dispatch = { workspace = true }
 broker-schedule = { workspace = true }
 broker-raft-meta = { workspace = true }
+broker-replication = { workspace = true }
 broker-local-auth = { workspace = true }
 broker-config = { workspace = true }
+broker-proto = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }
 wiremock = "0.6"
 broker-dispatch = { workspace = true }
-broker-proto = { workspace = true }
 serde_json = { workspace = true }

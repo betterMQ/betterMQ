@@ -1,18 +1,11 @@
 use crate::types::{BetterMqConfig, ClusterConfigSection, ConfigError};
+use broker_proto::HASH_VERSION;
 use broker_raft_meta::{ClusterConfig, ClusterRuntime, NodeConfig};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use uuid::Uuid;
 
 pub fn stable_node_id(key: &str) -> Uuid {
-    let mut h = DefaultHasher::new();
-    key.hash(&mut h);
-    let a = h.finish();
-    let mut h2 = DefaultHasher::new();
-    format!("bettermq:{key}").hash(&mut h2);
-    let b = h2.finish();
-    Uuid::from_u128((a as u128) | ((b as u128) << 64))
+    broker_proto::stable_node_id(key)
 }
 
 fn cluster_id_from_section(section: &ClusterConfigSection) -> Uuid {
@@ -53,10 +46,13 @@ pub fn build_cluster_config(cfg: &BetterMqConfig) -> Result<ClusterConfig, Confi
         nodes,
         node_id,
         generation: 1,
+        hash_version: HASH_VERSION,
     })
 }
 
 /// Write `cluster-config.json` from `bettermq.json` when missing or membership changed.
+/// Existing node IDs are preserved when peer addresses are unchanged so a hasher
+/// upgrade does not reshuffle identity.
 pub fn ensure_cluster_config(cfg: &BetterMqConfig, data_dir: &Path) -> Result<bool, ConfigError> {
     if !cfg.cluster_enabled() {
         return Ok(false);
@@ -69,10 +65,13 @@ pub fn ensure_cluster_config(cfg: &BetterMqConfig, data_dir: &Path) -> Result<bo
     let write = if cfg_path.exists() {
         let existing = ClusterRuntime::load_config(data_dir)
             .map_err(|e| ConfigError::Invalid(e.to_string()))?;
-        existing.cluster_id != desired.cluster_id
-            || existing.nodes.len() != desired.nodes.len()
-            || existing.node_id != desired.node_id
-            || nodes_differ(&existing.nodes, &desired.nodes)
+        if existing.hash_version != 0 && existing.hash_version != HASH_VERSION {
+            return Err(ConfigError::Invalid(format!(
+                "cluster hash_version {} is unsupported (expected {HASH_VERSION} or 0/legacy)",
+                existing.hash_version
+            )));
+        }
+        !addrs_match(&existing.nodes, &desired.nodes)
     } else {
         true
     };
@@ -86,16 +85,15 @@ pub fn ensure_cluster_config(cfg: &BetterMqConfig, data_dir: &Path) -> Result<bo
     Ok(true)
 }
 
-fn nodes_differ(a: &[NodeConfig], b: &[NodeConfig]) -> bool {
+fn addrs_match(a: &[NodeConfig], b: &[NodeConfig]) -> bool {
     if a.len() != b.len() {
-        return true;
+        return false;
     }
-    for (x, y) in a.iter().zip(b.iter()) {
-        if x.id != y.id || x.addr != y.addr {
-            return true;
-        }
-    }
-    false
+    let mut aa: Vec<_> = a.iter().map(|n| n.addr.as_str()).collect();
+    let mut bb: Vec<_> = b.iter().map(|n| n.addr.as_str()).collect();
+    aa.sort_unstable();
+    bb.sort_unstable();
+    aa == bb
 }
 
 #[cfg(test)]
@@ -109,6 +107,7 @@ mod tests {
         let b = stable_node_id("broker1");
         assert_eq!(a, b);
         assert_ne!(a, stable_node_id("broker2"));
+        assert_eq!(a.to_string(), "f65058f7-24a3-6df6-b8f3-72e54655c3ff");
     }
 
     #[test]
@@ -117,5 +116,6 @@ mod tests {
         let cluster = build_cluster_config(&cfg).expect("build");
         assert_eq!(cluster.nodes.len(), 3);
         assert!(!cluster.preferred_leader_for_shard(0).is_nil());
+        assert_eq!(cluster.hash_version, HASH_VERSION);
     }
 }

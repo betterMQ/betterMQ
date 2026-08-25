@@ -58,29 +58,44 @@ impl CatalogTombstones {
 
     fn load(&self) -> std::io::Result<TombstoneFile> {
         let bytes = std::fs::read(&self.path)?;
-        Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+        match serde_json::from_slice(&bytes) {
+            Ok(v) => Ok(v),
+            Err(_) if broker_proto::allow_empty_metadata_recovery() => Ok(TombstoneFile::default()),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        }
     }
 
-    fn save(&self, file: &TombstoneFile) -> std::io::Result<()> {
-        let _lock = broker_storage::FileLock::exclusive(&self.path)?;
+    fn persist_unlocked(&self, file: &TombstoneFile) -> std::io::Result<()> {
         let bytes = serde_json::to_vec_pretty(file)?;
         broker_storage::atomic_write_file(&self.path, &bytes)
     }
 
-    pub fn record(&self, id: Uuid, kind: CatalogKind) -> std::io::Result<()> {
+    fn mutate<T>(
+        &self,
+        f: impl FnOnce(&mut TombstoneFile) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        let _lock = broker_storage::FileLock::exclusive(&self.path)?;
         let mut file = self.load()?;
-        let now = Utc::now().timestamp_millis();
-        if let Some(existing) = file.tombstones.iter_mut().find(|t| t.id == id) {
-            existing.deleted_at_ms = now;
-            existing.kind = kind;
-        } else {
-            file.tombstones.push(CatalogTombstone {
-                id,
-                kind,
-                deleted_at_ms: now,
-            });
-        }
-        self.save(&file)
+        let out = f(&mut file)?;
+        self.persist_unlocked(&file)?;
+        Ok(out)
+    }
+
+    pub fn record(&self, id: Uuid, kind: CatalogKind) -> std::io::Result<()> {
+        self.mutate(|file| {
+            let now = Utc::now().timestamp_millis();
+            if let Some(existing) = file.tombstones.iter_mut().find(|t| t.id == id) {
+                existing.deleted_at_ms = now;
+                existing.kind = kind;
+            } else {
+                file.tombstones.push(CatalogTombstone {
+                    id,
+                    kind,
+                    deleted_at_ms: now,
+                });
+            }
+            Ok(())
+        })
     }
 
     pub fn is_deleted(&self, id: Uuid) -> bool {
@@ -113,26 +128,25 @@ impl CatalogTombstones {
         if remote.is_empty() {
             return Ok(());
         }
-        let mut file = self.load()?;
-        let mut changed = false;
-        for (id, deleted_at_ms) in remote {
-            if let Some(existing) = file.tombstones.iter_mut().find(|t| t.id == *id) {
-                if *deleted_at_ms > existing.deleted_at_ms {
-                    existing.deleted_at_ms = *deleted_at_ms;
+        self.mutate(|file| {
+            let mut changed = false;
+            for (id, deleted_at_ms) in remote {
+                if let Some(existing) = file.tombstones.iter_mut().find(|t| t.id == *id) {
+                    if *deleted_at_ms > existing.deleted_at_ms {
+                        existing.deleted_at_ms = *deleted_at_ms;
+                        changed = true;
+                    }
+                } else {
+                    file.tombstones.push(CatalogTombstone {
+                        id: *id,
+                        kind: CatalogKind::Queue,
+                        deleted_at_ms: *deleted_at_ms,
+                    });
                     changed = true;
                 }
-            } else {
-                file.tombstones.push(CatalogTombstone {
-                    id: *id,
-                    kind: CatalogKind::Queue,
-                    deleted_at_ms: *deleted_at_ms,
-                });
-                changed = true;
             }
-        }
-        if changed {
-            self.save(&file)?;
-        }
-        Ok(())
+            let _ = changed;
+            Ok(())
+        })
     }
 }

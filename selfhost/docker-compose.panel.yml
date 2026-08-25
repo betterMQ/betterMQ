@@ -1,0 +1,28 @@
+# Standalone management panel (no broker storage).
+#
+#   cd selfhost && docker compose -f docker-compose.panel.yml up -d
+#
+# Browser: http://localhost:8090/panel/
+# Point `--controller` at a regional cell admin URL.
+
+services:
+  panel:
+    image: ghcr.io/bettermq/bettermq:latest
+    build:
+      context: ..
+      dockerfile: selfhost/Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      BETTERMQ_CLUSTER_SECRET: ${BETTERMQ_CLUSTER_SECRET:-}
+      BETTERMQ_PANEL_MODE: standalone
+      BETTERMQ_CELL_LABEL: global
+    command:
+      [
+        "panel",
+        "--listen",
+        "0.0.0.0:8090",
+        "--controller",
+        "${BETTERMQ_CONTROLLER:-http://broker1:8080}",
+      ]
+    restart: unless-stopped

@@ -2,16 +2,24 @@
 
 use crate::routes::ApiError;
 use crate::AppState;
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    body::{Body, Bytes},
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::Response,
+    Json,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use broker_config::{load_managed_config, stable_node_id};
-use broker_dispatch::DeliveryJob;
 use broker_partition::{
-    is_dlq_topic, partition_for, DispatchGroup, FlowProfile, GroupMember, PublishRequest,
-    PublishResponse, Subscription,
+    is_dlq_topic, DispatchGroup, FlowProfile, GroupMember, PublishRequest, PublishResponse,
+    Subscription,
 };
 use broker_raft_meta::ClusterRuntime;
-use broker_replication::{ReplicateAppendRequest, ReplicationClient};
+use broker_replication::{
+    CatchUpFrame, ReplicaProgress, ReplicateAppendRequest, ReplicateBatchAck,
+    ReplicateBatchRequest, ReplicateCatchUpRange, ReplicateCatchUpRequest, ReplicationClient,
+};
 use broker_schedule::CronJob;
 use broker_storage::StorageMode;
 use chrono::Utc;
@@ -32,8 +40,11 @@ pub struct ClusterStatusResponse {
     pub healthy_count: usize,
     pub scheduler_leader_id: Option<Uuid>,
     pub this_node_scheduler_leader: bool,
+    pub controller_term: Option<u64>,
+    pub controller_quorum_lease: bool,
     pub nodes: Vec<ClusterNodeStatus>,
     pub shards: Vec<ShardLeaderStatus>,
+    pub replicas: Vec<ReplicaProgress>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +65,7 @@ pub struct ShardLeaderStatus {
     pub leader_addr: Option<String>,
     pub preferred_leader_id: Uuid,
     pub failover: bool,
+    pub ready: bool,
 }
 
 pub fn build_cluster_status(
@@ -70,8 +82,11 @@ pub fn build_cluster_status(
             healthy_count: 1,
             scheduler_leader_id: None,
             this_node_scheduler_leader: true,
+            controller_term: None,
+            controller_quorum_lease: true,
             nodes: vec![],
             shards: vec![],
+            replicas: vec![],
         };
     };
 
@@ -118,6 +133,7 @@ pub fn build_cluster_status(
             leader_addr: cfg.node_addr(leader),
             preferred_leader_id: preferred,
             failover: leader != preferred,
+            ready: leader != cfg.node_id || rt.shard_ready(shard),
         });
     }
 
@@ -131,8 +147,11 @@ pub fn build_cluster_status(
         healthy_count,
         scheduler_leader_id,
         this_node_scheduler_leader: rt.is_scheduler_leader(),
+        controller_term: Some(rt.controller_term()),
+        controller_quorum_lease: rt.has_controller_lease(),
         nodes,
         shards,
+        replicas: cluster.replication.replica_progress(),
     }
 }
 
@@ -147,31 +166,48 @@ pub async fn get_cluster_status(State(state): State<Arc<AppState>>) -> Json<Clus
 pub struct ClusterGossipRequest {
     pub observer: Uuid,
     pub seen: HashMap<Uuid, i64>,
+    #[serde(default)]
+    pub controller_vote: Option<broker_raft_meta::ControllerVoteRequest>,
+    #[serde(default)]
+    pub controller_leader: Option<broker_raft_meta::ControllerLeaderProof>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterGossipResponse {
+    pub observer: Uuid,
+    pub controller_term: u64,
+    pub vote: Option<broker_raft_meta::ControllerVoteResponse>,
 }
 
 #[derive(Clone)]
 pub struct ClusterHandle {
     pub runtime: ClusterRuntime,
     pub replication: ReplicationClient,
+    http: reqwest::Client,
 }
 
 impl ClusterHandle {
     pub fn new(runtime: ClusterRuntime) -> Self {
-        let replication = ReplicationClient::new(runtime.config().clone());
+        let replication =
+            ReplicationClient::new(runtime.config().clone()).with_runtime(runtime.clone());
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("cluster HTTP client");
         Self {
             runtime,
             replication,
+            http,
         }
     }
 }
 
 fn shard_for_request(state: &AppState, req: &PublishRequest) -> u32 {
-    let tenant_id = state.broker.tenant();
-    let partitions = state.broker.config().partitions;
-    partition_for(&tenant_id, &req.topic, &req.routing_key, partitions)
+    state.broker.assign_shard(&req.topic, &req.routing_key)
 }
 
 /// Enqueue push dispatch when this broker leads the message shard.
+/// Callers must invoke this only after the shard commit high watermark covers `offset`.
 pub fn enqueue_dispatch_after_publish(state: &AppState, resp: &PublishResponse) {
     if resp.duplicate {
         return;
@@ -188,59 +224,64 @@ pub fn enqueue_dispatch_after_publish(state: &AppState, resp: &PublishResponse) 
     if is_dlq_topic(&resp.topic) || !is_dispatch_leader(state, partition) {
         return;
     }
-    state.dispatch.enqueue(DeliveryJob::live(
-        resp.topic.clone(),
+    state.dispatch.notify_committed_range(
+        &resp.topic,
         partition,
         offset,
+        offset.saturating_add(1),
         message_id,
-    ));
+    );
 }
 
 async fn replicate_if_needed(
     state: &Arc<AppState>,
     resp: &mut PublishResponse,
-    idempotency_key: Option<&str>,
-) -> Result<(), ApiError> {
+    local_durable: impl std::future::Future<Output = Result<u64, ApiError>>,
+) -> Result<u64, ApiError> {
     if state.broker.config().storage == StorageMode::Slate {
-        return Ok(());
+        return local_durable.await;
     }
     let Some(cluster) = &state.cluster else {
-        return Ok(());
+        return local_durable.await;
     };
     if cluster.runtime.config().node_count() <= 1 {
-        return Ok(());
+        return local_durable.await;
     }
     let Some(partition) = resp.partition else {
-        return Ok(());
+        return local_durable.await;
     };
     let Some(offset) = resp.offset else {
-        return Ok(());
+        return local_durable.await;
     };
     let Some(frame) = resp.replication_frame.take() else {
-        return Ok(());
+        return local_durable.await;
     };
     let leader_generation = cluster.runtime.shard_generation(partition);
-    if let Err(e) = cluster
+    let batch = ReplicateBatchRequest::new(
+        state.broker.tenant(),
+        resp.topic.clone(),
+        partition,
+        cluster.runtime.config().node_id,
+        leader_generation,
+        offset,
+        vec![frame],
+    )
+    .map_err(|e| ApiError::ReplicationFailed(e.to_string()))?;
+    match cluster
         .replication
-        .replicate_append(
-            &state.broker.tenant(),
-            &resp.topic,
-            partition,
-            offset,
-            &frame,
-            leader_generation,
-        )
+        .replicate_batch_with_local(batch, async move {
+            local_durable.await.map_err(|error| {
+                broker_replication::ReplicateError::InvalidEpoch(error.to_string())
+            })
+        })
         .await
     {
-        warn!(error = %e, "replication quorum failed");
-        // Compensate: tombstone local orphan + clear dedup so client retry is clean.
-        let _ = state.broker.purge_message(&resp.topic, partition, offset);
-        if let Some(key) = idempotency_key {
-            let _ = state.broker.clear_publish_dedup(key);
+        Ok(outcome) => Ok(outcome.committed_hwm),
+        Err(e) => {
+            warn!(error = %e, "replication durable quorum failed");
+            Err(ApiError::ReplicationFailed(e.to_string()))
         }
-        return Err(ApiError::ReplicationFailed(e.to_string()));
     }
-    Ok(())
 }
 
 async fn publish_on_leader(
@@ -252,8 +293,48 @@ async fn publish_on_leader(
         .map(|m| m.body_bytes)
         .unwrap_or_else(|| req.payload.len() as u64);
     let idempotency_key = req.idempotency_key.clone();
-    let mut resp = state.broker.publish(req)?;
-    replicate_if_needed(state, &mut resp, idempotency_key.as_deref()).await?;
+    let mut resp = if state
+        .cluster
+        .as_ref()
+        .is_some_and(|c| c.runtime.config().node_count() > 1)
+        && state.broker.config().storage != StorageMode::Slate
+    {
+        state.broker.publish_defer_dedup(req)?
+    } else {
+        state.broker.publish(req)?
+    };
+    let topic = resp.topic.clone();
+    let wait = {
+        let broker = state.broker.clone();
+        let partition = resp.partition;
+        let offset = resp.offset;
+        async move {
+            if let (Some(partition), Some(offset)) = (partition, offset) {
+                broker
+                    .wait_committed(&topic, partition, offset)
+                    .await
+                    .map_err(ApiError::from)
+            } else {
+                Ok(0)
+            }
+        }
+    };
+    let epoch = replicate_if_needed(state, &mut resp, wait).await?;
+    resp.commit_epoch = Some(epoch);
+    if let (Some(key), false) = (idempotency_key.as_deref(), resp.duplicate) {
+        if let (Some(message_id), Some(offset), Some(partition)) =
+            (resp.message_id, resp.offset, resp.partition)
+        {
+            state.broker.commit_publish_dedup(
+                key,
+                broker_partition::DedupEntry {
+                    message_id,
+                    offset,
+                    partition,
+                },
+            )?;
+        }
+    }
     if let Some(m) = meter {
         if !resp.duplicate {
             crate::metering::record_ingest(state, m.tenant_id, body_bytes).await;
@@ -275,11 +356,7 @@ async fn forward_publish_to_leader(
         "{}/internal/v1/cluster/publish",
         leader.trim_end_matches('/')
     );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    let resp = crate::cluster_auth::apply_cluster_secret(client.post(&url))
+    let resp = crate::cluster_auth::apply_cluster_secret(cluster.http.post(&url))
         .json(req)
         .send()
         .await
@@ -537,14 +614,14 @@ pub async fn sync_catalog_from_peers(state: &Arc<AppState>) {
 }
 
 /// Pull catalog from peers after boot (covers creates that happened while this node was down).
-pub fn spawn_cluster_catalog_sync(state: Arc<AppState>) {
+pub fn spawn_cluster_catalog_sync(state: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     if catalog_peer_urls(&state).is_empty() {
-        return;
+        return None;
     }
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         sync_catalog_from_peers(&state).await;
-    });
+    }))
 }
 
 /// Push local catalog to a peer that just came back online.
@@ -602,6 +679,61 @@ async fn propagate_catalog_to_peers<T: Serialize>(
         }
     }
     notified
+}
+
+fn persist_catalog_tombstone(
+    state: &AppState,
+    id: Uuid,
+    kind: crate::catalog_tombstones::CatalogKind,
+) {
+    if let Err(e) = state.catalog_tombstones.record(id, kind) {
+        warn!(error = %e, %id, "catalog tombstone persist failed");
+    }
+}
+
+async fn fanout_catalog<T: Serialize>(state: &AppState, path: &str, body: &T, what: &'static str) {
+    let peers = catalog_peer_urls(state);
+    let notified = propagate_catalog_to_peers(&peers, path, body).await;
+    if !peers.is_empty() && notified == 0 {
+        warn!(
+            peers = peers.len(),
+            what, "catalog propagate did not reach any peer"
+        );
+    }
+}
+
+async fn advance_catalog_controller(state: &AppState) {
+    if let Some(cluster) = &state.cluster {
+        if let Err(error) = cluster.runtime.advance_catalog_epoch().await {
+            warn!(%error, "catalog mutation rejected by OpenRaft controller");
+        }
+    }
+}
+
+async fn put_authoritative_catalog(
+    state: &AppState,
+    kind: &str,
+    key: &str,
+    payload: &impl serde::Serialize,
+    tombstone: bool,
+) {
+    let Some(cluster) = &state.cluster else {
+        return;
+    };
+    let payload_json = match serde_json::to_string(payload) {
+        Ok(json) => json,
+        Err(error) => {
+            warn!(%error, kind, key, "catalog record serialize failed");
+            return;
+        }
+    };
+    if let Err(error) = cluster
+        .runtime
+        .put_catalog_record(kind.into(), key.into(), payload_json, tombstone)
+        .await
+    {
+        warn!(%error, kind, key, "authoritative catalog write rejected");
+    }
 }
 
 pub fn catalog_snapshot(state: &AppState) -> CatalogSnapshot {
@@ -962,6 +1094,8 @@ pub async fn internal_catalog_apply(
 }
 
 pub async fn replicate_flow_catalog(state: &AppState, profile: FlowProfile) {
+    advance_catalog_controller(state).await;
+    put_authoritative_catalog(state, "flow", &profile.id.to_string(), &profile, false).await;
     let peers = catalog_peer_urls(state);
     let notified = propagate_catalog_to_peers(
         &peers,
@@ -978,6 +1112,15 @@ pub async fn replicate_flow_catalog(state: &AppState, profile: FlowProfile) {
 }
 
 pub async fn replicate_queue_catalog(state: &AppState, subscription: Subscription) {
+    advance_catalog_controller(state).await;
+    put_authoritative_catalog(
+        state,
+        "queue",
+        &subscription.id.to_string(),
+        &subscription,
+        false,
+    )
+    .await;
     let peers = catalog_peer_urls(state);
     let notified = propagate_catalog_to_peers(
         &peers,
@@ -994,30 +1137,35 @@ pub async fn replicate_queue_catalog(state: &AppState, subscription: Subscriptio
 }
 
 pub async fn replicate_flow_delete(state: &AppState, flow_id: Uuid) {
-    let _ = state
-        .catalog_tombstones
-        .record(flow_id, crate::catalog_tombstones::CatalogKind::Flow);
-    let _ = propagate_catalog_to_peers(
-        &catalog_peer_urls(state),
+    advance_catalog_controller(state).await;
+    persist_catalog_tombstone(state, flow_id, crate::catalog_tombstones::CatalogKind::Flow);
+    fanout_catalog(
+        state,
         "/internal/v1/cluster/catalog/flow/delete",
         &CatalogFlowDelete { flow_id },
+        "flow delete",
     )
     .await;
 }
 
 pub async fn replicate_queue_delete(state: &AppState, queue_id: Uuid) {
-    let _ = state
-        .catalog_tombstones
-        .record(queue_id, crate::catalog_tombstones::CatalogKind::Queue);
-    let _ = propagate_catalog_to_peers(
-        &catalog_peer_urls(state),
+    advance_catalog_controller(state).await;
+    persist_catalog_tombstone(
+        state,
+        queue_id,
+        crate::catalog_tombstones::CatalogKind::Queue,
+    );
+    fanout_catalog(
+        state,
         "/internal/v1/cluster/catalog/queue/delete",
         &CatalogQueueDelete { queue_id },
+        "queue delete",
     )
     .await;
 }
 
 pub async fn replicate_group_catalog(state: &AppState, group: DispatchGroup) {
+    advance_catalog_controller(state).await;
     let peers = catalog_peer_urls(state);
     let notified = propagate_catalog_to_peers(
         &peers,
@@ -1034,6 +1182,7 @@ pub async fn replicate_group_catalog(state: &AppState, group: DispatchGroup) {
 }
 
 pub async fn replicate_group_member_catalog(state: &AppState, member: GroupMember) {
+    advance_catalog_controller(state).await;
     let peers = catalog_peer_urls(state);
     let notified = propagate_catalog_to_peers(
         &peers,
@@ -1050,31 +1199,39 @@ pub async fn replicate_group_member_catalog(state: &AppState, member: GroupMembe
 }
 
 pub async fn replicate_group_delete(state: &AppState, group_id: Uuid) {
-    let _ = state
-        .catalog_tombstones
-        .record(group_id, crate::catalog_tombstones::CatalogKind::Group);
-    let _ = propagate_catalog_to_peers(
-        &catalog_peer_urls(state),
+    advance_catalog_controller(state).await;
+    persist_catalog_tombstone(
+        state,
+        group_id,
+        crate::catalog_tombstones::CatalogKind::Group,
+    );
+    fanout_catalog(
+        state,
         "/internal/v1/cluster/catalog/group/delete",
         &CatalogGroupDelete { group_id },
+        "group delete",
     )
     .await;
 }
 
 pub async fn replicate_group_member_delete(state: &AppState, member_id: Uuid) {
-    let _ = state.catalog_tombstones.record(
+    advance_catalog_controller(state).await;
+    persist_catalog_tombstone(
+        state,
         member_id,
         crate::catalog_tombstones::CatalogKind::GroupMember,
     );
-    let _ = propagate_catalog_to_peers(
-        &catalog_peer_urls(state),
+    fanout_catalog(
+        state,
         "/internal/v1/cluster/catalog/group-member/delete",
         &CatalogGroupMemberDelete { member_id },
+        "group member delete",
     )
     .await;
 }
 
 pub async fn replicate_cron_catalog(state: &AppState, job: CronJob) {
+    advance_catalog_controller(state).await;
     let peers = catalog_peer_urls(state);
     let notified = propagate_catalog_to_peers(
         &peers,
@@ -1094,10 +1251,11 @@ pub async fn replicate_auth_credentials(
     state: &AppState,
     creds: broker_local_auth::AuthCredentials,
 ) {
-    let _ = propagate_catalog_to_peers(
-        &catalog_peer_urls(state),
+    fanout_catalog(
+        state,
         "/internal/v1/cluster/auth/apply",
         &ClusterAuthSnapshot { credentials: creds },
+        "auth credentials",
     )
     .await;
 }
@@ -1168,13 +1326,13 @@ pub async fn internal_cluster_auth_apply(
 }
 
 pub async fn replicate_cron_delete(state: &AppState, cron_id: Uuid) {
-    let _ = state
-        .catalog_tombstones
-        .record(cron_id, crate::catalog_tombstones::CatalogKind::Cron);
-    let _ = propagate_catalog_to_peers(
-        &catalog_peer_urls(state),
+    advance_catalog_controller(state).await;
+    persist_catalog_tombstone(state, cron_id, crate::catalog_tombstones::CatalogKind::Cron);
+    fanout_catalog(
+        state,
         "/internal/v1/cluster/catalog/cron/delete",
         &CatalogCronDelete { cron_id },
+        "cron delete",
     )
     .await;
 }
@@ -1205,9 +1363,11 @@ pub async fn internal_catalog_delete_flow(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CatalogFlowDelete>,
 ) -> Result<StatusCode, ApiError> {
-    let _ = state
-        .catalog_tombstones
-        .record(body.flow_id, crate::catalog_tombstones::CatalogKind::Flow);
+    persist_catalog_tombstone(
+        &state,
+        body.flow_id,
+        crate::catalog_tombstones::CatalogKind::Flow,
+    );
     if state
         .broker
         .get_flow_profile(body.flow_id)
@@ -1237,9 +1397,11 @@ pub async fn internal_catalog_delete_cron(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CatalogCronDelete>,
 ) -> Result<StatusCode, ApiError> {
-    let _ = state
-        .catalog_tombstones
-        .record(body.cron_id, crate::catalog_tombstones::CatalogKind::Cron);
+    persist_catalog_tombstone(
+        &state,
+        body.cron_id,
+        crate::catalog_tombstones::CatalogKind::Cron,
+    );
     if state.crons.get(body.cron_id).is_ok() {
         state
             .crons
@@ -1253,9 +1415,11 @@ pub async fn internal_catalog_delete_queue(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CatalogQueueDelete>,
 ) -> Result<StatusCode, ApiError> {
-    let _ = state
-        .catalog_tombstones
-        .record(body.queue_id, crate::catalog_tombstones::CatalogKind::Queue);
+    persist_catalog_tombstone(
+        &state,
+        body.queue_id,
+        crate::catalog_tombstones::CatalogKind::Queue,
+    );
     if state
         .broker
         .get_queue_by_id(body.queue_id)
@@ -1285,9 +1449,11 @@ pub async fn internal_catalog_delete_group(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CatalogGroupDelete>,
 ) -> Result<StatusCode, ApiError> {
-    let _ = state
-        .catalog_tombstones
-        .record(body.group_id, crate::catalog_tombstones::CatalogKind::Group);
+    persist_catalog_tombstone(
+        &state,
+        body.group_id,
+        crate::catalog_tombstones::CatalogKind::Group,
+    );
     if state
         .broker
         .get_group(body.group_id)
@@ -1317,7 +1483,8 @@ pub async fn internal_catalog_delete_group_member(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CatalogGroupMemberDelete>,
 ) -> Result<StatusCode, ApiError> {
-    let _ = state.catalog_tombstones.record(
+    persist_catalog_tombstone(
+        &state,
         body.member_id,
         crate::catalog_tombstones::CatalogKind::GroupMember,
     );
@@ -1364,6 +1531,11 @@ pub async fn internal_replicate(
             "slate mode: frame replication disabled".into(),
         ));
     }
+    if body.leader_generation == u64::MAX {
+        return Err(ApiError::BadRequest(
+            "replicate leader_generation is invalid".into(),
+        ));
+    }
     if let Some(cluster) = &state.cluster {
         let expected = cluster.runtime.shard_generation(body.partition);
         if body.leader_generation < expected {
@@ -1376,16 +1548,190 @@ pub async fn internal_replicate(
         if body.leader_generation > expected {
             cluster
                 .runtime
-                .observe_shard_generation(body.partition, body.leader_generation);
+                .try_observe_shard_generation(body.partition, body.leader_generation)
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         }
     }
     let frame = B64
         .decode(&body.frame_b64)
         .map_err(|e| ApiError::BadRequest(format!("invalid frame_b64: {e}")))?;
+    let (header, _) = {
+        let mut cursor = std::io::Cursor::new(&frame);
+        broker_proto::decode_frame(&mut cursor)
+            .map_err(|e| ApiError::BadRequest(format!("invalid frame: {e}")))?
+    };
+    if header.topic != body.topic {
+        return Err(ApiError::BadRequest(
+            "replicate frame topic does not match request topic".into(),
+        ));
+    }
+    if !body.tenant_id.is_empty() && header.tenant_id != body.tenant_id {
+        return Err(ApiError::BadRequest(
+            "replicate frame tenant does not match request tenant".into(),
+        ));
+    }
     state
         .broker
         .append_replicated_frame(&body.topic, body.partition, &frame, Some(body.offset))?;
+    state
+        .broker
+        .wait_committed(&body.topic, body.partition, body.offset)
+        .await?;
     Ok(StatusCode::OK)
+}
+
+fn validate_replication_epoch(
+    runtime: &ClusterRuntime,
+    body: &ReplicateBatchRequest,
+) -> Result<(), ApiError> {
+    let elected = runtime.elect_leader_for_shard(body.partition);
+    if elected != Some(body.leader_id) {
+        return Err(ApiError::BadRequest(format!(
+            "replication leader {} is not elected for shard {}",
+            body.leader_id, body.partition
+        )));
+    }
+    let expected = runtime.shard_generation(body.partition);
+    if body.leader_epoch < expected {
+        return Err(ApiError::BadRequest(format!(
+            "stale leader_epoch {} < {}",
+            body.leader_epoch, expected
+        )));
+    }
+    if body.leader_epoch > expected {
+        if body.leader_epoch != expected.saturating_add(1) {
+            return Err(ApiError::BadRequest(format!(
+                "leader_epoch jump {} -> {} is not allowed",
+                expected, body.leader_epoch
+            )));
+        }
+        let observed = runtime
+            .try_observe_shard_generation(body.partition, body.leader_epoch)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        if observed != body.leader_epoch {
+            return Err(ApiError::BadRequest(format!(
+                "failed to durably adopt leader_epoch {}",
+                body.leader_epoch
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub async fn internal_replicate_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ReplicateBatchAck>, ApiError> {
+    if state.broker.config().storage == StorageMode::Slate {
+        return Err(ApiError::BadRequest(
+            "slate mode: frame replication disabled".into(),
+        ));
+    }
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if content_type
+        .split(';')
+        .next()
+        .is_none_or(|value| value.trim() != "application/octet-stream")
+    {
+        return Err(ApiError::BadRequest(
+            "replicate batch requires Content-Type: application/octet-stream".into(),
+        ));
+    }
+    let body = ReplicateBatchRequest::decode_binary(&body)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if let Some(cluster) = &state.cluster {
+        validate_replication_epoch(&cluster.runtime, &body)?;
+    }
+
+    // Validate every frame before mutating the follower WAL. This prevents a
+    // bad CRC/topic/count near the end of an epoch from causing a partial append.
+    // An empty epoch topic denotes a V2 physical-shard epoch containing several
+    // logical topics; each validated frame then carries its authoritative topic.
+    let mut frame_topics = Vec::with_capacity(body.frames.len());
+    for frame in &body.frames {
+        let (header, _) = broker_proto::decode_frame(std::io::Cursor::new(frame))
+            .map_err(|e| ApiError::BadRequest(format!("invalid frame: {e}")))?;
+        if !body.topic.is_empty() && header.topic != body.topic {
+            return Err(ApiError::BadRequest(
+                "replicate frame topic does not match epoch topic".into(),
+            ));
+        }
+        if !body.tenant_id.is_empty() && header.tenant_id != body.tenant_id {
+            return Err(ApiError::BadRequest(
+                "replicate frame tenant does not match epoch tenant".into(),
+            ));
+        }
+        frame_topics.push(header.topic);
+    }
+
+    let mut last_offset = body.first_offset;
+    for (i, (frame, topic)) in body.frames.iter().zip(&frame_topics).enumerate() {
+        let offset = body.first_offset + i as u64;
+        last_offset = offset;
+        state
+            .broker
+            .append_replicated_frame(topic, body.partition, frame, Some(offset))?;
+    }
+    let commit_topic = frame_topics.first().cloned().unwrap_or_default();
+    let durable_hwm = state
+        .broker
+        .wait_committed(&commit_topic, body.partition, last_offset)
+        .await?;
+    let node_id = state
+        .cluster
+        .as_ref()
+        .map(|cluster| cluster.runtime.config().node_id)
+        .ok_or_else(|| ApiError::BadRequest("cluster mode not enabled".into()))?;
+    Ok(Json(ReplicateBatchAck {
+        node_id,
+        partition: body.partition,
+        leader_epoch: body.leader_epoch,
+        durable_hwm,
+    }))
+}
+
+pub async fn internal_replicate_catch_up(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ReplicateCatchUpRequest>,
+) -> Result<Response, ApiError> {
+    let committed_hwm = state.broker.committed_hwm(&body.topic, body.partition)?;
+    let committed_remaining = committed_hwm.saturating_sub(body.from_offset) as usize;
+    let max_records = body.max_records.clamp(1, 4096).min(committed_remaining);
+    let frames = if max_records == 0 {
+        Vec::new()
+    } else {
+        state.broker.replication_frames(
+            &body.topic,
+            body.partition,
+            body.from_offset,
+            max_records,
+        )?
+    };
+    let leader_generation = state
+        .cluster
+        .as_ref()
+        .map(|c| c.runtime.shard_generation(body.partition))
+        .unwrap_or(0);
+    let frames = frames
+        .into_iter()
+        .map(|(offset, bytes)| CatchUpFrame { offset, bytes })
+        .collect();
+    let encoded = ReplicateCatchUpRange {
+        partition: body.partition,
+        leader_generation,
+        frames,
+        committed_hwm,
+    }
+    .encode_binary()
+    .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .body(Body::from(encoded))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
 pub fn is_dispatch_leader(state: &AppState, partition: u32) -> bool {
@@ -1405,11 +1751,79 @@ pub async fn internal_cluster_config(
     Ok(Json(cluster.runtime.config().clone()))
 }
 
+pub async fn internal_controller_vote(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<broker_raft_meta::RaftVoteRequest>,
+) -> Result<Json<broker_raft_meta::RaftVoteResponse>, ApiError> {
+    let controller = state
+        .cluster
+        .as_ref()
+        .and_then(|cluster| cluster.runtime.controller())
+        .ok_or_else(|| ApiError::BadRequest("OpenRaft controller is not enabled".into()))?;
+    controller
+        .raft()
+        .vote(request)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+pub async fn internal_controller_append(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<broker_raft_meta::ControllerAppendRequest>,
+) -> Result<Json<broker_raft_meta::ControllerAppendResponse>, ApiError> {
+    let controller = state
+        .cluster
+        .as_ref()
+        .and_then(|cluster| cluster.runtime.controller())
+        .ok_or_else(|| ApiError::BadRequest("OpenRaft controller is not enabled".into()))?;
+    let response = controller
+        .raft()
+        .append_entries(request)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    controller.note_leader_contact();
+    Ok(Json(response))
+}
+
+pub async fn internal_controller_snapshot(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<broker_raft_meta::ControllerSnapshotRequest>,
+) -> Result<Json<broker_raft_meta::ControllerSnapshotResponse>, ApiError> {
+    let controller = state
+        .cluster
+        .as_ref()
+        .and_then(|cluster| cluster.runtime.controller())
+        .ok_or_else(|| ApiError::BadRequest("OpenRaft controller is not enabled".into()))?;
+    controller
+        .raft()
+        .install_snapshot(request)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+pub async fn internal_controller_command(
+    State(state): State<Arc<AppState>>,
+    Json(command): Json<broker_raft_meta::ControllerCommand>,
+) -> Result<Json<broker_raft_meta::ControllerCommandResponse>, ApiError> {
+    let controller = state
+        .cluster
+        .as_ref()
+        .and_then(|cluster| cluster.runtime.controller())
+        .ok_or_else(|| ApiError::BadRequest("OpenRaft controller is not enabled".into()))?;
+    let state = controller
+        .submit(command)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(Json(broker_raft_meta::ControllerCommandResponse { state }))
+}
+
 /// Merge peer health observations from another cluster member (CP7b gossip).
 pub async fn internal_cluster_gossip(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ClusterGossipRequest>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<ClusterGossipResponse>, ApiError> {
     let cluster = state
         .cluster
         .as_ref()
@@ -1424,12 +1838,32 @@ pub async fn internal_cluster_gossip(
         return Err(ApiError::BadRequest("unknown gossip observer".into()));
     }
     cluster.runtime.merge_peer_health(&body.seen);
-    Ok(StatusCode::OK)
+    if let Some(proof) = &body.controller_leader {
+        cluster
+            .runtime
+            .observe_controller_leader(proof)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    }
+    let vote = body
+        .controller_vote
+        .as_ref()
+        .map(|request| cluster.runtime.vote_controller(request))
+        .transpose()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(ClusterGossipResponse {
+        observer: cluster.runtime.config().node_id,
+        controller_term: cluster.runtime.controller_term(),
+        vote,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::peer_fanout_urls;
+    use super::{peer_fanout_urls, validate_replication_epoch};
+    use broker_raft_meta::{ClusterConfig, ClusterRuntime, NodeConfig};
+    use broker_replication::ReplicateBatchRequest;
+    use chrono::Utc;
+    use uuid::Uuid;
 
     #[test]
     fn rewrites_localhost_peer_for_container_fanout() {
@@ -1442,5 +1876,48 @@ mod tests {
     fn leaves_docker_internal_url_unchanged() {
         let url = "http://host.docker.internal:8081";
         assert_eq!(peer_fanout_urls(url), vec![url.to_string()]);
+    }
+
+    #[test]
+    fn stale_and_skipped_replication_terms_are_fenced() {
+        let leader = Uuid::new_v4();
+        let follower = Uuid::new_v4();
+        let runtime = ClusterRuntime::from_config_only(ClusterConfig {
+            cluster_id: Uuid::new_v4(),
+            nodes: vec![
+                NodeConfig {
+                    id: leader,
+                    addr: "http://leader".into(),
+                },
+                NodeConfig {
+                    id: follower,
+                    addr: "http://follower".into(),
+                },
+            ],
+            node_id: follower,
+            generation: 1,
+            hash_version: 1,
+        });
+        let now = Utc::now().timestamp_millis();
+        runtime.record_self_alive(now);
+        runtime.record_peer_alive(leader, now);
+        assert_eq!(runtime.observe_shard_generation(0, 5), 5);
+
+        let request = |term| {
+            ReplicateBatchRequest::new(
+                "default".into(),
+                "jobs".into(),
+                0,
+                leader,
+                term,
+                0,
+                vec![b"frame".to_vec()],
+            )
+            .unwrap()
+        };
+        assert!(validate_replication_epoch(&runtime, &request(4)).is_err());
+        assert!(validate_replication_epoch(&runtime, &request(7)).is_err());
+        assert!(validate_replication_epoch(&runtime, &request(6)).is_ok());
+        assert_eq!(runtime.shard_generation(0), 6);
     }
 }

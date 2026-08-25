@@ -8,6 +8,9 @@
 #
 #   open http://localhost:8080/panel/
 #
+# The container listens on 0.0.0.0:8080 (published to the host). For internet
+# exposure, put a reverse proxy in front and prefer binding the host to 127.0.0.1.
+#
 # Configure storage and cluster from Panel → Infrastructure (no config file mount).
 
 services:
@@ -25,7 +28,7 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
       interval: 10s
       timeout: 3s
       retries: 5

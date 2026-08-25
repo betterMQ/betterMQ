@@ -1,5 +1,6 @@
 //! Flow-control profiles (rate, parallelism, grouping key) — separate from queues.
 
+use crate::catalog_journal::CatalogJournal;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -14,10 +15,16 @@ pub enum FlowProfileError {
     Serde(#[from] serde_json::Error),
     #[error("flow profile not found: {0}")]
     NotFound(Uuid),
+    #[error("duplicate flow {0}")]
+    Duplicate(Uuid),
+    #[error("unsupported flow catalog version: {0}")]
+    UnsupportedVersion(u16),
+    #[error("flow catalog journal: {0}")]
+    Journal(String),
 }
 
-/// Named flow-control policy referenced by `flow_id` on publish / enqueue / cron.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Named flow-control policy referenced by `flow_id` on publish / cron (not enqueue).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlowProfile {
     pub id: Uuid,
     pub tenant_id: String,
@@ -44,12 +51,49 @@ impl FlowProfile {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FlowFile {
+    #[serde(default)]
+    version: u16,
+    #[serde(default)]
+    revision: u64,
     profiles: Vec<FlowProfile>,
+}
+
+const FLOW_CATALOG_VERSION: u16 = 1;
+const FLOW_COMPACT_OPS: usize = 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum FlowCommand {
+    Patch {
+        upserts: Vec<FlowProfile>,
+        deletes: Vec<Uuid>,
+    },
+}
+
+fn apply_command(file: &mut FlowFile, command: FlowCommand) {
+    match command {
+        FlowCommand::Patch { upserts, deletes } => {
+            file.profiles
+                .retain(|profile| !deletes.contains(&profile.id));
+            for profile in upserts {
+                if let Some(slot) = file
+                    .profiles
+                    .iter_mut()
+                    .find(|existing| existing.id == profile.id)
+                {
+                    *slot = profile;
+                } else {
+                    file.profiles.push(profile);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct FlowProfileRegistry {
     path: PathBuf,
+    journal: CatalogJournal,
 }
 
 fn meta_file_path(data_dir: &Path, name: &str) -> PathBuf {
@@ -68,21 +112,78 @@ impl FlowProfileRegistry {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, FlowProfileError> {
         let path = meta_file_path(data_dir.as_ref(), "flows.json");
         if !path.exists() {
-            std::fs::write(&path, serde_json::to_vec_pretty(&FlowFile::default())?)?;
+            let file = FlowFile {
+                version: FLOW_CATALOG_VERSION,
+                ..FlowFile::default()
+            };
+            std::fs::write(&path, serde_json::to_vec_pretty(&file)?)?;
         }
-        Ok(Self { path })
+        let journal = CatalogJournal::new(&path, FLOW_CATALOG_VERSION);
+        Ok(Self { path, journal })
     }
 
     fn load(&self) -> Result<FlowFile, FlowProfileError> {
-        let bytes = std::fs::read(&self.path)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        self.load_state().map(|state| state.0)
     }
 
-    fn save(&self, file: &FlowFile) -> Result<(), FlowProfileError> {
+    fn load_state(&self) -> Result<(FlowFile, usize), FlowProfileError> {
+        let bytes = std::fs::read(&self.path)?;
+        let mut file: FlowFile = serde_json::from_slice(&bytes)?;
+        if file.version != 0 && file.version != FLOW_CATALOG_VERSION {
+            return Err(FlowProfileError::UnsupportedVersion(file.version));
+        }
+        file.version = FLOW_CATALOG_VERSION;
+        let (revision, operations) = self
+            .journal
+            .replay(file.revision, |command| apply_command(&mut file, command))
+            .map_err(|error| FlowProfileError::Journal(error.to_string()))?;
+        file.revision = revision;
+        Ok((file, operations))
+    }
+
+    fn mutate<T>(
+        &self,
+        f: impl FnOnce(&mut FlowFile) -> Result<T, FlowProfileError>,
+    ) -> Result<T, FlowProfileError> {
         let _lock = broker_storage::FileLock::exclusive(&self.path)?;
-        let bytes = serde_json::to_vec_pretty(file)?;
-        broker_storage::atomic_write_file(&self.path, &bytes)?;
-        Ok(())
+        let (mut file, journal_ops) = self.load_state()?;
+        let before = file.profiles.clone();
+        let out = f(&mut file)?;
+        let before_by_id: std::collections::HashMap<_, _> =
+            before.into_iter().map(|item| (item.id, item)).collect();
+        let after_by_id: std::collections::HashMap<_, _> = file
+            .profiles
+            .iter()
+            .cloned()
+            .map(|item| (item.id, item))
+            .collect();
+        let upserts: Vec<_> = after_by_id
+            .iter()
+            .filter(|(id, item)| before_by_id.get(id) != Some(*item))
+            .map(|(_, item)| item.clone())
+            .collect();
+        let deletes: Vec<_> = before_by_id
+            .keys()
+            .filter(|id| !after_by_id.contains_key(id))
+            .copied()
+            .collect();
+        if upserts.is_empty() && deletes.is_empty() {
+            return Ok(out);
+        }
+        let revision = file
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| FlowProfileError::Journal("revision exhausted".into()))?;
+        self.journal
+            .append(revision, &FlowCommand::Patch { upserts, deletes })
+            .map_err(|error| FlowProfileError::Journal(error.to_string()))?;
+        file.revision = revision;
+        if journal_ops.saturating_add(1) >= FLOW_COMPACT_OPS {
+            self.journal
+                .compact(&self.path, &file)
+                .map_err(|error| FlowProfileError::Journal(error.to_string()))?;
+        }
+        Ok(out)
     }
 
     /// Insert or replace by `id` (cluster catalog sync, LWW).
@@ -90,21 +191,21 @@ impl FlowProfileRegistry {
         if profile.updated_at_ms == 0 {
             profile.updated_at_ms = Utc::now().timestamp_millis();
         }
-        let mut file = self.load()?;
-        if let Some(pos) = file
-            .profiles
-            .iter()
-            .position(|p| p.tenant_id == profile.tenant_id && p.id == profile.id)
-        {
-            if file.profiles[pos].updated_at_ms > profile.updated_at_ms {
-                return Ok(());
+        self.mutate(|file| {
+            if let Some(pos) = file
+                .profiles
+                .iter()
+                .position(|p| p.tenant_id == profile.tenant_id && p.id == profile.id)
+            {
+                if file.profiles[pos].updated_at_ms > profile.updated_at_ms {
+                    return Ok(());
+                }
+                file.profiles[pos] = profile;
+            } else {
+                file.profiles.push(profile);
             }
-            file.profiles[pos] = profile;
-        } else {
-            file.profiles.push(profile);
-        }
-        self.save(&file)?;
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn create(
@@ -115,19 +216,30 @@ impl FlowProfileRegistry {
         rate: u32,
         period_secs: u64,
     ) -> Result<FlowProfile, FlowProfileError> {
-        let mut file = self.load()?;
-        let profile = FlowProfile {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            key,
-            parallelism: parallelism.max(1),
-            rate,
-            period_secs: period_secs.max(1),
-            updated_at_ms: Utc::now().timestamp_millis(),
-        };
-        file.profiles.push(profile.clone());
-        self.save(&file)?;
-        Ok(profile)
+        self.mutate(|file| {
+            let parallelism = parallelism.max(1);
+            let period_secs = period_secs.max(1);
+            if let Some(existing) = file.profiles.iter().find(|p| {
+                p.tenant_id == tenant_id
+                    && p.key == key
+                    && p.parallelism == parallelism
+                    && p.rate == rate
+                    && p.period_secs == period_secs
+            }) {
+                return Err(FlowProfileError::Duplicate(existing.id));
+            }
+            let profile = FlowProfile {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                key,
+                parallelism,
+                rate,
+                period_secs,
+                updated_at_ms: Utc::now().timestamp_millis(),
+            };
+            file.profiles.push(profile.clone());
+            Ok(profile)
+        })
     }
 
     pub fn get_by_key(
@@ -151,21 +263,30 @@ impl FlowProfileRegistry {
         rate: u32,
         period_secs: u64,
     ) -> Result<FlowProfile, FlowProfileError> {
-        let mut file = self.load()?;
-        if let Some(existing) = file
-            .profiles
-            .iter_mut()
-            .find(|p| p.tenant_id == tenant_id && p.key == key)
-        {
-            existing.parallelism = parallelism.max(1);
-            existing.rate = rate;
-            existing.period_secs = period_secs.max(1);
-            existing.updated_at_ms = Utc::now().timestamp_millis();
-            let updated = existing.clone();
-            self.save(&file)?;
-            return Ok(updated);
-        }
-        self.create(tenant_id, key, parallelism, rate, period_secs)
+        self.mutate(|file| {
+            if let Some(existing) = file
+                .profiles
+                .iter_mut()
+                .find(|p| p.tenant_id == tenant_id && p.key == key)
+            {
+                existing.parallelism = parallelism.max(1);
+                existing.rate = rate;
+                existing.period_secs = period_secs.max(1);
+                existing.updated_at_ms = Utc::now().timestamp_millis();
+                return Ok(existing.clone());
+            }
+            let profile = FlowProfile {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                key,
+                parallelism: parallelism.max(1),
+                rate,
+                period_secs: period_secs.max(1),
+                updated_at_ms: Utc::now().timestamp_millis(),
+            };
+            file.profiles.push(profile.clone());
+            Ok(profile)
+        })
     }
 
     /// Reuse an existing profile when key + limits match; otherwise create
@@ -213,14 +334,64 @@ impl FlowProfileRegistry {
     }
 
     pub fn delete(&self, tenant_id: &str, id: Uuid) -> Result<FlowProfile, FlowProfileError> {
-        let mut file = self.load()?;
-        let pos = file
-            .profiles
-            .iter()
-            .position(|p| p.tenant_id == tenant_id && p.id == id)
-            .ok_or(FlowProfileError::NotFound(id))?;
-        let removed = file.profiles.remove(pos);
-        self.save(&file)?;
-        Ok(removed)
+        self.mutate(|file| {
+            let pos = file
+                .profiles
+                .iter()
+                .position(|p| p.tenant_id == tenant_id && p.id == id)
+                .ok_or(FlowProfileError::NotFound(id))?;
+            Ok(file.profiles.remove(pos))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_revision_survives_restart_and_newer_version_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FlowProfileRegistry::open(dir.path()).unwrap();
+        let flow = registry
+            .create("tenant", "account".into(), 2, 10, 60)
+            .unwrap();
+        drop(registry);
+        let reopened = FlowProfileRegistry::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened
+                .get_by_id("tenant", flow.id)
+                .unwrap()
+                .unwrap()
+                .parallelism,
+            2
+        );
+
+        std::fs::write(
+            dir.path().join("flows.json"),
+            br#"{"version":99,"revision":2,"profiles":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            reopened.load(),
+            Err(FlowProfileError::UnsupportedVersion(99))
+        ));
+    }
+
+    #[test]
+    fn create_rejects_exact_duplicate_and_keeps_existing_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FlowProfileRegistry::open(dir.path()).unwrap();
+        let first = registry
+            .create("tenant", "user-1".into(), 1, 100, 60)
+            .unwrap();
+        let err = registry
+            .create("tenant", "user-1".into(), 1, 100, 60)
+            .unwrap_err();
+        assert!(matches!(err, FlowProfileError::Duplicate(id) if id == first.id));
+        let different_limits = registry
+            .create("tenant", "user-1".into(), 2, 100, 60)
+            .unwrap();
+        assert_ne!(first.id, different_limits.id);
     }
 }

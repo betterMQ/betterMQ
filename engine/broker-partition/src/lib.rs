@@ -2,17 +2,23 @@
 
 mod blob;
 mod broker;
+mod catalog_journal;
 mod flow;
 mod flows;
 mod groups;
 pub mod http_delivery;
+mod layout;
 pub mod payload;
 mod priority;
+mod shard;
 mod subscriptions;
+mod telemetry;
 mod tenant_scope;
 mod topic;
 
-pub use flow::{delivery_uses_flow_control, FlowSpec, ResolvedFlow};
+pub use flow::{
+    delivery_uses_flow_control, flow_lane_owner, queue_delivery_flow, FlowSpec, ResolvedFlow,
+};
 pub use http_delivery::{
     deserialize_optional_headers, parse_headers_value, HttpDeliveryInput, HttpDeliverySpec,
 };
@@ -21,9 +27,10 @@ pub use priority::{
 };
 
 pub use broker::{
-    Broker, BrokerConfig, BrokerError, CreateSubscriptionRequest, CreateSubscriptionResponse,
-    DestinationSnapshot, PublishRequest, PublishResponse, ScheduledInfo, DEFAULT_PARTITIONS,
-    DEFAULT_TENANT,
+    AppendedRecordRef, AppendedShardBatch, Broker, BrokerConfig, BrokerError,
+    CreateSubscriptionRequest, CreateSubscriptionResponse, DestinationSnapshot,
+    PreparedPublishBatch, PreparedShardBatch, PreparedShardKey, PublishRequest, PublishResponse,
+    ScheduledInfo, DEFAULT_PARTITIONS, DEFAULT_TENANT,
 };
 pub use flows::{FlowProfile, FlowProfileError, FlowProfileRegistry};
 pub use groups::{DispatchGroup, GroupError, GroupMember, GroupRegistry};
@@ -34,4 +41,10 @@ pub use topic::{
     DIRECT_TOPIC,
 };
 
-pub use broker_storage::StoredMessage;
+pub use broker_storage::{DedupEntry, StoredMessage};
+pub use layout::{ShardLayout, DEFAULT_V2_SHARDS, LAYOUT_V1, LAYOUT_V2};
+pub use shard::{CommitTicket, ShardHandle};
+pub use telemetry::{
+    partition_telemetry_snapshot, PartitionTelemetrySnapshot, ShardQueueTelemetrySnapshot,
+    MAX_QUEUE_TELEMETRY_SHARDS,
+};

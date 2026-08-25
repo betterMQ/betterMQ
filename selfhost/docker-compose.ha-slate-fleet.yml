@@ -17,14 +17,15 @@ x-broker: &broker
     S3_ENDPOINT: http://minio:9000
     S3_BUCKET: bettermq
     S3_PAYLOAD_BUCKET: bettermq-payloads
-    S3_ACCESS_KEY: minio
-    S3_SECRET_KEY: minio12345
+    S3_ACCESS_KEY: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+    S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
     S3_REGION: us-east-1
+    BETTERMQ_METRICS_TOKEN: ${BETTERMQ_METRICS_TOKEN:?set BETTERMQ_METRICS_TOKEN}
   depends_on:
     - minio
   restart: unless-stopped
   healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+    test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
     interval: 10s
     timeout: 3s
     retries: 5
@@ -35,8 +36,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: minio12345
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -47,10 +48,13 @@ services:
     image: minio/mc:latest
     depends_on:
       - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
     entrypoint: >
       /bin/sh -c "
       sleep 3;
-      mc alias set local http://minio:9000 minio minio12345;
+      mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\";
       mc mb -p local/bettermq || true;
       mc mb -p local/bettermq-payloads || true;
       exit 0;

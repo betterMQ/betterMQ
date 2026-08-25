@@ -19,6 +19,53 @@ fn default_http_method() -> String {
     "POST".into()
 }
 
+pub fn is_allowed_http_method(method: &str) -> bool {
+    matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD")
+}
+
+pub fn is_denied_outbound_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "keep-alive"
+            | "upgrade"
+            | "te"
+            | "trailer"
+            | "proxy-authorization"
+            | "authorization"
+    )
+}
+
+pub fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            matches!(
+                b,
+                b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+        })
+}
+
 impl HttpDeliverySpec {
     pub fn merge(
         method: Option<String>,
@@ -76,6 +123,26 @@ impl HttpDeliverySpec {
         };
         spec.normalize();
         spec
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_allowed_http_method(&self.method) {
+            return Err(format!(
+                "unsupported HTTP method {} (allowed: GET, POST, PUT, PATCH, DELETE, HEAD)",
+                self.method
+            ));
+        }
+        for name in self.headers.keys() {
+            if !is_valid_header_name(name) {
+                return Err(format!("invalid header name: {name}"));
+            }
+            if is_denied_outbound_header(name) {
+                return Err(format!(
+                    "header {name} is not allowed on outbound webhook requests"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -163,9 +230,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_array_headers() {
-        let v: Value = serde_json::json!([["X-Custom", "1"], "Accept: application/json"]);
-        let h = parse_headers_value(&v).unwrap();
-        assert_eq!(h.len(), 2);
+    fn rejects_denied_headers_and_methods() {
+        let mut spec = HttpDeliverySpec {
+            method: "TRACE".into(),
+            headers: HashMap::from([("Host".into(), "evil".into())]),
+            sign: false,
+        };
+        spec.normalize();
+        assert!(spec.validate().is_err());
+        spec.method = "POST".into();
+        assert!(spec.validate().is_err());
+        spec.headers.clear();
+        spec.headers.insert("X-Custom".into(), "1".into());
+        assert!(spec.validate().is_ok());
     }
 }

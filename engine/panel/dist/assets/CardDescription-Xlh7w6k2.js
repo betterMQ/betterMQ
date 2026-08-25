@@ -1,0 +1,1 @@
+import{$n as e,An as t,Ct as n,S as r,gt as i,j as a,t as o}from"./utils-CK_khZkI.js";var s=a({__name:`CardDescription`,props:{class:{type:[Boolean,null,String,Object,Array]}},setup(a){let s=a;return(a,c)=>(i(),r(`div`,{"data-slot":`card-description`,class:e(t(o)(`text-muted-foreground text-sm`,s.class))},[n(a.$slots,`default`)],2))}});export{s as t};

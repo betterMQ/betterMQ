@@ -1,12 +1,12 @@
 //! Per-destination host circuit breaker (CP6a / CP6b).
 //! When `BETTERMQ_SHARED_META_DIR` is set, block state is shared across brokers (Phase E).
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
@@ -54,6 +54,7 @@ pub struct HostBlocker {
     cfg: HostBlockerConfig,
     hosts: Mutex<HashMap<String, HostState>>,
     shared_path: Option<PathBuf>,
+    last_shared_load_ms: Mutex<i64>,
 }
 
 fn now_ms() -> i64 {
@@ -73,6 +74,7 @@ impl HostBlocker {
             cfg,
             hosts: Mutex::new(HashMap::new()),
             shared_path: shared_path.clone(),
+            last_shared_load_ms: Mutex::new(0),
         };
         if let Some(ref path) = shared_path {
             hb.load_shared(path);
@@ -81,6 +83,9 @@ impl HostBlocker {
     }
 
     fn load_shared(&self, path: &Path) {
+        let Ok(_lock) = broker_storage::FileLock::exclusive(path) else {
+            return;
+        };
         let Ok(mut f) = File::open(path) else {
             return;
         };
@@ -91,7 +96,7 @@ impl HostBlocker {
         let Ok(file) = serde_json::from_str::<SharedHostFile>(&buf) else {
             return;
         };
-        let mut hosts = self.hosts.lock().expect("host blocker lock");
+        let mut hosts = self.hosts.lock();
         for (k, e) in file.hosts {
             hosts.insert(
                 k,
@@ -102,6 +107,18 @@ impl HostBlocker {
                 },
             );
         }
+        *self.last_shared_load_ms.lock() = now_ms();
+    }
+
+    fn maybe_reload_shared(&self) {
+        let Some(ref path) = self.shared_path else {
+            return;
+        };
+        let now = now_ms();
+        if now.saturating_sub(*self.last_shared_load_ms.lock()) < 1_000 {
+            return;
+        }
+        self.load_shared(path);
     }
 
     fn persist_shared(&self) {
@@ -111,7 +128,10 @@ impl HostBlocker {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let hosts = self.hosts.lock().expect("host blocker lock");
+        let Ok(_lock) = broker_storage::FileLock::exclusive(path) else {
+            return;
+        };
+        let hosts = self.hosts.lock();
         let file = SharedHostFile {
             hosts: hosts
                 .iter()
@@ -131,17 +151,7 @@ impl HostBlocker {
         let Ok(json) = serde_json::to_vec_pretty(&file) else {
             return;
         };
-        let tmp = path.with_extension("json.tmp");
-        if let Ok(mut f) = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp)
-        {
-            let _ = f.write_all(&json);
-            let _ = f.sync_all();
-            let _ = std::fs::rename(&tmp, path);
-        }
+        let _ = broker_storage::atomic_write_file(path, &json);
     }
 
     pub fn host_key(url: &str) -> Option<String> {
@@ -154,14 +164,11 @@ impl HostBlocker {
     }
 
     pub fn is_blocked(&self, url: &str) -> bool {
-        // Refresh from shared file periodically for multi-broker.
-        if let Some(ref path) = self.shared_path {
-            self.load_shared(path);
-        }
+        self.maybe_reload_shared();
         let Some(key) = Self::host_key(url) else {
             return false;
         };
-        let hosts = self.hosts.lock().expect("host blocker lock");
+        let hosts = self.hosts.lock();
         let Some(state) = hosts.get(&key) else {
             return false;
         };
@@ -172,7 +179,7 @@ impl HostBlocker {
         let Some(key) = Self::host_key(url) else {
             return;
         };
-        self.hosts.lock().expect("host blocker lock").remove(&key);
+        self.hosts.lock().remove(&key);
         self.persist_shared();
     }
 
@@ -181,7 +188,7 @@ impl HostBlocker {
             return;
         };
         {
-            let mut hosts = self.hosts.lock().expect("host blocker lock");
+            let mut hosts = self.hosts.lock();
             let state = hosts.entry(key).or_insert_with(|| HostState {
                 failures: 0,
                 blocked_until_ms: None,
@@ -212,7 +219,7 @@ impl HostBlocker {
             host.trim().to_string()
         };
         let wait = duration_ms.max(1_000);
-        self.hosts.lock().expect("host blocker lock").insert(
+        self.hosts.lock().insert(
             key.clone(),
             HostState {
                 failures: self.cfg.failures_before_block,
@@ -231,12 +238,7 @@ impl HostBlocker {
         } else {
             host.to_string()
         };
-        let removed = self
-            .hosts
-            .lock()
-            .expect("host blocker lock")
-            .remove(&key)
-            .is_some();
+        let removed = self.hosts.lock().remove(&key).is_some();
         if removed {
             self.persist_shared();
         }
@@ -244,10 +246,8 @@ impl HostBlocker {
     }
 
     pub fn blocked_hosts(&self) -> Vec<(String, u64)> {
-        if let Some(ref path) = self.shared_path {
-            self.load_shared(path);
-        }
-        let hosts = self.hosts.lock().expect("host blocker lock");
+        self.maybe_reload_shared();
+        let hosts = self.hosts.lock();
         let now = now_ms();
         hosts
             .iter()
@@ -261,6 +261,33 @@ impl HostBlocker {
                 })
             })
             .collect()
+    }
+
+    pub fn telemetry_snapshot(&self) -> crate::telemetry::HostPressureSnapshot {
+        self.maybe_reload_shared();
+        let hosts = self.hosts.lock();
+        let now = now_ms();
+        let mut blocked_hosts = 0u64;
+        let mut hosts_with_failures = 0u64;
+        let mut current_failures = 0u64;
+        let mut max_host_failures = 0u64;
+        for state in hosts.values() {
+            blocked_hosts += u64::from(
+                state
+                    .blocked_until_ms
+                    .is_some_and(|blocked_until| blocked_until > now),
+            );
+            hosts_with_failures += u64::from(state.failures > 0);
+            current_failures = current_failures.saturating_add(u64::from(state.failures));
+            max_host_failures = max_host_failures.max(u64::from(state.failures));
+        }
+        crate::telemetry::HostPressureSnapshot {
+            tracked_hosts: hosts.len() as u64,
+            blocked_hosts,
+            hosts_with_failures,
+            current_failures,
+            max_host_failures,
+        }
     }
 }
 
@@ -282,6 +309,10 @@ mod tests {
         assert!(!hb.is_blocked(url));
         hb.record_transport_failure(url);
         assert!(hb.is_blocked(url));
+        let snapshot = hb.telemetry_snapshot();
+        assert_eq!(snapshot.tracked_hosts, 1);
+        assert_eq!(snapshot.blocked_hosts, 1);
+        assert_eq!(snapshot.current_failures, 2);
         hb.record_success(url);
         assert!(!hb.is_blocked(url));
     }

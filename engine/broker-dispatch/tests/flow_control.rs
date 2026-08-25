@@ -1,4 +1,4 @@
-//! Flow control: parallelism=1 orders by priority; parallelism>1 allows overlap.
+//! Flow control: parallelism=1 is strict FIFO; parallelism>1 allows overlap.
 
 use broker_dispatch::{DispatchConfig, DispatchEngine};
 use broker_partition::{Broker, BrokerConfig, CreateSubscriptionRequest, PublishRequest};
@@ -17,7 +17,7 @@ fn allow_wiremock_localhost() {
 }
 
 #[tokio::test]
-async fn fifo_parallelism_one_orders_by_priority() {
+async fn fifo_parallelism_one_ignores_priority() {
     allow_wiremock_localhost();
     let dir = tempdir().unwrap();
     let broker = Broker::open(BrokerConfig::new(dir.path().to_path_buf())).unwrap();
@@ -55,13 +55,10 @@ async fn fifo_parallelism_one_orders_by_priority() {
             topic: "fc".into(),
             url: format!("{}/hook", mock.uri()),
             secret: "sec".into(),
+            parallelism: None,
             default_max_retries: None,
             retry_backoff: None,
         })
-        .unwrap();
-
-    let flow = broker
-        .create_flow_profile("user-42".into(), 1, 0, 60)
         .unwrap();
 
     let rk = "user-42";
@@ -79,7 +76,7 @@ async fn fifo_parallelism_one_orders_by_priority() {
                 idempotency_key: None,
                 delay_ms: None,
                 priority,
-                flow_id: Some(flow.id),
+                flow_id: None,
                 url: None,
                 secret: None,
                 destination: None,
@@ -99,6 +96,7 @@ async fn fifo_parallelism_one_orders_by_priority() {
             resp.message_id.unwrap(),
         ));
     }
+    broker.flush_wal().unwrap();
 
     for (partition, offset, message_id) in published {
         dispatch.enqueue(broker_dispatch::DeliveryJob::live(
@@ -110,7 +108,7 @@ async fn fifo_parallelism_one_orders_by_priority() {
     let seen = order.lock().unwrap().clone();
     assert_eq!(
         seen,
-        vec!["b", "c", "a"],
-        "expected priority 9, then 5, then 1"
+        vec!["a", "b", "c"],
+        "parallelism=1 must preserve publish order"
     );
 }

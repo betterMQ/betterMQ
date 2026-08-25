@@ -3,6 +3,7 @@
 use axum::{
     body::Body,
     http::{header, StatusCode},
+    middleware,
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -11,7 +12,7 @@ use rust_embed::RustEmbed;
 use std::path::PathBuf;
 
 #[derive(RustEmbed)]
-#[folder = "../control-panel/"]
+#[folder = "../panel/dist/"]
 struct PanelAssets;
 
 pub fn embedded_router() -> Router {
@@ -22,6 +23,7 @@ pub fn embedded_router() -> Router {
             "/{*path}",
             get(|axum::extract::Path(p): axum::extract::Path<String>| serve(p)),
         )
+        .layer(middleware::from_fn(crate::security::panel_security_headers))
 }
 
 pub fn resolve_router() -> Router {
@@ -43,14 +45,29 @@ pub fn filesystem_router(dir: PathBuf) -> Router {
     Router::new()
         .route("/panel-config.js", get(panel_config_js))
         .fallback_service(service)
+        .layer(axum::middleware::from_fn(
+            crate::security::panel_security_headers,
+        ))
 }
 
 async fn panel_config_js() -> Response {
-    let body = if cfg!(feature = "cloud") {
-        "window.__BETTERMQ_EXTERNAL_AUTH__=true;"
+    let mode = std::env::var("BETTERMQ_PANEL_MODE").unwrap_or_else(|_| "embedded".into());
+    let admin_base =
+        std::env::var("BETTERMQ_ADMIN_API_BASE").unwrap_or_else(|_| "/admin/v1".into());
+    let cell = std::env::var("BETTERMQ_CELL_LABEL").unwrap_or_else(|_| "local".into());
+    let flags = std::env::var("BETTERMQ_PANEL_FLAGS").unwrap_or_else(|_| "".into());
+    let external = if cfg!(feature = "cloud") {
+        "true"
     } else {
-        "window.__BETTERMQ_EXTERNAL_AUTH__=false;"
+        "false"
     };
+    let body = format!(
+        "window.__BETTERMQ_EXTERNAL_AUTH__={external};\n\
+         window.__BETTERMQ_PANEL_MODE__={mode:?};\n\
+         window.__BETTERMQ_ADMIN_API__={admin_base:?};\n\
+         window.__BETTERMQ_CELL_LABEL__={cell:?};\n\
+         window.__BETTERMQ_FEATURE_FLAGS__={flags:?};\n"
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header(

@@ -27,7 +27,7 @@ impl StorageMode {
 }
 
 pub enum PartitionBackend {
-    Local(PartitionLog),
+    Local(Box<PartitionLog>),
     #[cfg(feature = "slate")]
     Slate(crate::slate_log::SlatePartitionLog),
 }
@@ -37,7 +37,18 @@ impl PartitionBackend {
         dir: impl AsRef<std::path::Path>,
         config: PartitionLogConfig,
     ) -> Result<Self, LogError> {
-        Ok(Self::Local(PartitionLog::open(dir, config)?))
+        Ok(Self::Local(Box::new(PartitionLog::open(dir, config)?)))
+    }
+
+    pub fn open_local_for_shard(
+        dir: impl AsRef<std::path::Path>,
+        config: PartitionLogConfig,
+        shard_id: u32,
+        wal_format: u16,
+    ) -> Result<Self, LogError> {
+        Ok(Self::Local(Box::new(PartitionLog::open_for_shard(
+            dir, config, shard_id, wal_format,
+        )?)))
     }
 
     #[cfg(feature = "slate")]
@@ -75,10 +86,7 @@ impl PartitionBackend {
         fence_generation: Option<u64>,
     ) -> Result<(StoredMessage, Vec<u8>), LogError> {
         match self {
-            Self::Local(log) => {
-                let _ = fence_generation;
-                log.append(partition, header, payload)
-            }
+            Self::Local(log) => log.append_fenced(partition, header, payload, fence_generation),
             #[cfg(feature = "slate")]
             Self::Slate(log) => log.append_fenced(partition, header, payload, fence_generation),
         }
@@ -118,6 +126,49 @@ impl PartitionBackend {
         }
     }
 
+    pub fn committed_hwm(&self) -> u64 {
+        match self {
+            Self::Local(log) => log.committed_hwm(),
+            #[cfg(feature = "slate")]
+            Self::Slate(log) => log.high_watermark(),
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        match self {
+            Self::Local(log) => log.is_dirty(),
+            #[cfg(feature = "slate")]
+            Self::Slate(_) => false,
+        }
+    }
+
+    pub fn fsync_mode(&self) -> crate::log::FsyncMode {
+        match self {
+            Self::Local(log) => log.fsync_mode(),
+            #[cfg(feature = "slate")]
+            Self::Slate(_) => crate::log::FsyncMode::Always,
+        }
+    }
+
+    pub fn append_batch(
+        &mut self,
+        partition: u32,
+        items: Vec<(broker_proto::LogRecord, Vec<u8>)>,
+        fence_generation: Option<u64>,
+    ) -> Result<Vec<(StoredMessage, Vec<u8>)>, LogError> {
+        match self {
+            Self::Local(log) => log.append_batch(partition, items, fence_generation),
+            #[cfg(feature = "slate")]
+            Self::Slate(log) => {
+                let mut out = Vec::with_capacity(items.len());
+                for (header, payload) in items {
+                    out.push(log.append_fenced(partition, header, payload, fence_generation)?);
+                }
+                Ok(out)
+            }
+        }
+    }
+
     pub fn purge_offset(&mut self, offset: u64) -> bool {
         match self {
             Self::Local(log) => log.purge_offset(offset),
@@ -126,11 +177,44 @@ impl PartitionBackend {
         }
     }
 
+    pub fn gc_sealed_below(&mut self, watermark: u64) -> Result<usize, LogError> {
+        match self {
+            Self::Local(log) => log.gc_sealed_below(watermark),
+            #[cfg(feature = "slate")]
+            Self::Slate(_) => Ok(0),
+        }
+    }
+
     pub fn sync(&mut self) -> Result<(), LogError> {
         match self {
             Self::Local(log) => log.sync(),
             #[cfg(feature = "slate")]
             Self::Slate(log) => log.sync(),
+        }
+    }
+
+    pub fn flush_if_due(&mut self) -> Result<(), LogError> {
+        match self {
+            Self::Local(log) => log.flush_if_due(),
+            #[cfg(feature = "slate")]
+            Self::Slate(_) => Ok(()),
+        }
+    }
+
+    pub fn flush_count(&self) -> u64 {
+        match self {
+            Self::Local(log) => log.flush_count(),
+            #[cfg(feature = "slate")]
+            Self::Slate(_) => 0,
+        }
+    }
+
+    /// Deterministic fault injection used by durability tests.
+    pub fn inject_fsync_failure(&mut self) {
+        match self {
+            Self::Local(log) => log.inject_fsync_failure(),
+            #[cfg(feature = "slate")]
+            Self::Slate(_) => {}
         }
     }
 }

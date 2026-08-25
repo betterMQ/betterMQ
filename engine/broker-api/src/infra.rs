@@ -449,12 +449,20 @@ fn write_join_token(dir: &std::path::Path, file: &JoinTokenFile) -> Result<(), A
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(io_err)?;
     }
-    std::fs::write(path, serde_json::to_vec_pretty(file).map_err(io_err)?).map_err(io_err)
+    std::fs::write(&path, serde_json::to_vec_pretty(file).map_err(io_err)?).map_err(io_err)?;
+    broker_storage::set_secret_file_mode(&path);
+    Ok(())
 }
 
 fn validate_join_token(file: &JoinTokenFile, token: &str) -> bool {
     let now = Utc::now().timestamp_millis();
-    file.token == token && file.expires_at_ms > now
+    if file.expires_at_ms <= now {
+        return false;
+    }
+    use subtle::ConstantTimeEq;
+    let a = token.as_bytes();
+    let b = file.token.as_bytes();
+    a.len() == b.len() && bool::from(a.ct_eq(b))
 }
 
 pub async fn infra_status(
@@ -684,9 +692,18 @@ fn extract_join_token(
         }
     }
     if let Some(t) = query_token.map(str::trim).filter(|s| !s.is_empty()) {
-        return Ok(t.to_string());
+        let allow_query = matches!(
+            std::env::var("BETTERMQ_JOIN_TOKEN_QUERY")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("1") | Some("true") | Some("TRUE") | Some("yes")
+        );
+        if allow_query {
+            return Ok(t.to_string());
+        }
     }
-    Err(ApiError::BadRequest(
+    Err(ApiError::Unauthorized(
         "missing join token (use Authorization: Bearer or x-bettermq-join-token)".into(),
     ))
 }
@@ -899,6 +916,20 @@ pub async fn infra_cluster_join(
     }))
 }
 
+/// Same as join, but authenticated by the seed join token (public). Used by the
+/// panel attach proxy so a fresh broker does not need its own API token.
+pub async fn infra_cluster_enroll(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ClusterJoinRequest>,
+) -> Result<Json<ClusterJoinResponse>, ApiError> {
+    if state.dispatch_fleet {
+        return Err(ApiError::BadRequest(
+            "enroll is not supported on dispatch fleet or WAL-less processes".into(),
+        ));
+    }
+    infra_cluster_join(State(state), Json(body)).await
+}
+
 pub async fn infra_cluster_remove_node(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ClusterRemoveNodeRequest>,
@@ -934,6 +965,21 @@ pub async fn infra_cluster_remove_node(
         return Err(ApiError::BadRequest(
             "cannot remove the seed node — remove followers first or reset this broker".into(),
         ));
+    }
+    let removed_id = runtime
+        .iter()
+        .find(|peer| {
+            peer.id == stable_node_id(&removed.name) || urls_match(&peer.addr, &removed.public_url)
+        })
+        .map(|peer| peer.id)
+        .unwrap_or_else(|| stable_node_id(&removed.name));
+    if let Some(cluster) = &state.cluster {
+        if let Some(controller) = cluster.runtime.controller() {
+            controller
+                .drain_data_node(removed_id)
+                .await
+                .map_err(|error| ApiError::Conflict(error.to_string()))?;
+        }
     }
     let cluster = cfg
         .cluster
@@ -1256,6 +1302,7 @@ pub fn public_infra_routes() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route("/v1/infra/join/bootstrap", get(infra_join_bootstrap))
         .route("/v1/infra/cluster/register", post(infra_cluster_register))
+        .route("/v1/infra/cluster/enroll", post(infra_cluster_enroll))
 }
 
 pub fn protected_infra_routes() -> axum::Router<std::sync::Arc<AppState>> {

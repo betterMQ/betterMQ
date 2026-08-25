@@ -11,7 +11,7 @@ mod s3;
 pub use fs::FsBlobStore;
 pub use inline::InlinePayloadStore;
 pub use r#ref::PayloadRef;
-pub use store::{hydrate_payload, inline_max_bytes, prepare_for_log, BlobStore};
+pub use store::{hydrate_payload, inline_max_bytes, max_blob_bytes, prepare_for_log, BlobStore};
 
 #[cfg(feature = "s3")]
 pub use s3::S3BlobStore;
@@ -31,6 +31,10 @@ pub enum PayloadError {
     Io(#[from] std::io::Error),
     #[error("store error: {0}")]
     Store(String),
+    #[error("payload too large: {size} bytes exceeds limit {limit}")]
+    TooLarge { size: u64, limit: u64 },
+    #[error("invalid blob key: {0}")]
+    InvalidKey(#[from] broker_proto::PathSegmentError),
 }
 
 /// Threshold above which callers should use blob storage (see `inline_max_bytes()`).
@@ -88,5 +92,35 @@ mod tests {
         let mut restored = inline;
         hydrate_payload(&store, &mut restored, Some(&json)).unwrap();
         assert_eq!(restored, body);
+    }
+
+    #[test]
+    fn blob_key_rejects_traversal() {
+        assert!(PayloadRef::key_for("../etc", Uuid::new_v4()).is_err());
+        let dir = tempdir().unwrap();
+        let store = FsBlobStore::open(dir.path()).unwrap();
+        let bad = PayloadRef {
+            tenant_id: "t".into(),
+            message_id: Uuid::new_v4(),
+            bucket_key: "../secret".into(),
+            size: 1,
+            sha256: None,
+        };
+        assert!(store.get_blob(&bad).is_err());
+    }
+
+    #[test]
+    fn fs_blob_streams_in_and_out_with_checksum() {
+        let dir = tempdir().unwrap();
+        let store = FsBlobStore::open(dir.path()).unwrap();
+        let id = Uuid::new_v4();
+        let input = vec![7u8; 2 * 1024 * 1024 + 17];
+        let reference = store
+            .put_blob_reader("default", id, std::io::Cursor::new(&input))
+            .unwrap();
+        let mut output = Vec::new();
+        let written = store.get_blob_to_writer(&reference, &mut output).unwrap();
+        assert_eq!(written, input.len() as u64);
+        assert_eq!(output, input);
     }
 }

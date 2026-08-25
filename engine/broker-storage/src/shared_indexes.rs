@@ -1,4 +1,8 @@
 //! Flock-backed shared meta indexes (cursors + dedup) for multi-node local WAL.
+//!
+//! `indexes.json` is loaded into memory on every operation. Very large
+//! idempotency/cursor maps will grow RSS unbounded — compact or shard the file
+//! if a tenant accumulates millions of keys.
 
 use crate::flock::FileLock;
 use crate::indexes::DedupEntry;
@@ -14,6 +18,8 @@ pub enum SharedIndexError {
     Io(#[from] std::io::Error),
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("corrupt indexes.json; set BETTERMQ_METADATA_RECOVER=empty to start fresh")]
+    Corrupt,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -22,6 +28,8 @@ struct SharedIndexFile {
     dedup: HashMap<String, DedupEntry>,
     #[serde(default)]
     dispatch: HashMap<String, u64>,
+    #[serde(default)]
+    completed: HashMap<String, Vec<u64>>,
 }
 
 /// Shared-meta store for idempotency + dispatch cursors (HA M2).
@@ -47,7 +55,13 @@ impl SharedMetadataStore {
         let _lock = FileLock::exclusive(&self.path)?;
         let mut file = if self.path.exists() {
             let bytes = std::fs::read(&self.path)?;
-            serde_json::from_slice(&bytes).unwrap_or_default()
+            match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(_) if broker_proto::allow_empty_metadata_recovery() => {
+                    SharedIndexFile::default()
+                }
+                Err(_) => return Err(SharedIndexError::Corrupt),
+            }
         } else {
             SharedIndexFile::default()
         };
@@ -64,7 +78,13 @@ impl SharedMetadataStore {
         let _lock = FileLock::exclusive(&self.path)?;
         let file = if self.path.exists() {
             let bytes = std::fs::read(&self.path)?;
-            serde_json::from_slice(&bytes).unwrap_or_default()
+            match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(_) if broker_proto::allow_empty_metadata_recovery() => {
+                    SharedIndexFile::default()
+                }
+                Err(_) => return Err(SharedIndexError::Corrupt),
+            }
         } else {
             SharedIndexFile::default()
         };
@@ -134,7 +154,72 @@ impl SharedMetadataStore {
         let key = Self::dispatch_key(tenant_id, subscription_id, partition);
         self.with_locked(|file| {
             file.dispatch.insert(key, next_offset);
+            let completion_key = Self::complete_key(tenant_id, subscription_id, partition);
+            if let Some(completed) = file.completed.get_mut(&completion_key) {
+                completed.retain(|offset| *offset >= next_offset);
+                if completed.is_empty() {
+                    file.completed.remove(&completion_key);
+                }
+            }
             Ok(())
         })
+    }
+
+    fn complete_key(tenant_id: &str, subscription_id: &str, partition: u32) -> String {
+        Self::dispatch_key(tenant_id, subscription_id, partition)
+    }
+
+    pub fn mark_dispatch_complete(
+        &self,
+        tenant_id: &str,
+        subscription_id: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Result<(), SharedIndexError> {
+        let key = Self::complete_key(tenant_id, subscription_id, partition);
+        self.with_locked(|file| {
+            let entry = file.completed.entry(key).or_default();
+            if !entry.contains(&offset) {
+                entry.push(offset);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn is_dispatch_complete(
+        &self,
+        tenant_id: &str,
+        subscription_id: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Result<bool, SharedIndexError> {
+        let key = Self::complete_key(tenant_id, subscription_id, partition);
+        self.with_locked_read(|file| {
+            Ok(file
+                .completed
+                .get(&key)
+                .map(|v| v.contains(&offset))
+                .unwrap_or(false))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_advance_compacts_shared_completion_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SharedMetadataStore::open(dir.path()).unwrap();
+        store
+            .mark_dispatch_complete("tenant", "lane", 0, 1)
+            .unwrap();
+        store
+            .mark_dispatch_complete("tenant", "lane", 0, 3)
+            .unwrap();
+        store.set_dispatch_offset("tenant", "lane", 0, 2).unwrap();
+        assert!(!store.is_dispatch_complete("tenant", "lane", 0, 1).unwrap());
+        assert!(store.is_dispatch_complete("tenant", "lane", 0, 3).unwrap());
     }
 }

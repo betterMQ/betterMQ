@@ -17,6 +17,7 @@ fn messages_survive_reopen() {
                 topic: "events".into(),
                 url: "http://127.0.0.1:1/pull-only".into(),
                 secret: "sec".into(),
+                parallelism: None,
                 default_max_retries: None,
                 retry_backoff: None,
             })
@@ -73,6 +74,7 @@ fn ten_thousand_messages_durable() {
                 topic: "load".into(),
                 url: "http://127.0.0.1:1/pull-only".into(),
                 secret: "sec".into(),
+                parallelism: None,
                 default_max_retries: None,
                 retry_backoff: None,
             })

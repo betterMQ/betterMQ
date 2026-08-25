@@ -1,0 +1,7 @@
+# Transitive advisories we cannot bump without a new object_store/SlateDB release.
+[advisories]
+ignore = [
+    # object_store 0.12 pins quick-xml 0.38 (NsReader DoS / quadratic attrs).
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0194",
+]

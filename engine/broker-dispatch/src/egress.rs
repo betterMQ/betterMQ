@@ -9,7 +9,7 @@
 //!
 //! Hostnames are resolved (A/AAAA) at validate time so DNS→private-IP is rejected.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use thiserror::Error;
 use url::Url;
 
@@ -34,6 +34,12 @@ pub fn validate_destination_url(raw: &str) -> Result<(), EgressError> {
 
 /// Async validate: resolve DNS and reject blocked IPs (DNS rebinding defense).
 pub async fn validate_destination_url_resolved(raw: &str) -> Result<(), EgressError> {
+    pin_destination_addr(raw).await.map(|_| ())
+}
+
+/// Resolve once, reject blocked IPs, and return a `(host, addr)` pin for the HTTP client.
+/// The delivery client must `.resolve(host, addr)` so connect cannot re-resolve to a private IP.
+pub async fn pin_destination_addr(raw: &str) -> Result<Option<(String, SocketAddr)>, EgressError> {
     let allow_private = allow_private_destinations();
     validate_destination_url_with(raw, allow_private)?;
     let parsed = Url::parse(raw.trim()).map_err(|_| EgressError::InvalidUrl)?;
@@ -41,24 +47,29 @@ pub async fn validate_destination_url_resolved(raw: &str) -> Result<(), EgressEr
         .host_str()
         .ok_or(EgressError::MissingHost)?
         .to_ascii_lowercase();
-    if host.parse::<IpAddr>().is_ok() {
-        return Ok(());
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_blocked_destination_ip(ip, allow_private) {
+            return Err(EgressError::HostNotAllowed);
+        }
+        return Ok(Some((host, SocketAddr::new(ip, port))));
     }
-    let lookup = format!("{host}:0");
-    let addrs = tokio::net::lookup_host(&lookup)
+    let lookup = format!("{host}:{port}");
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(&lookup)
         .await
-        .map_err(|_| EgressError::ResolveFailed)?;
-    let mut any = false;
-    for addr in addrs {
-        any = true;
+        .map_err(|_| EgressError::ResolveFailed)?
+        .collect();
+    if addrs.is_empty() {
+        return Err(EgressError::ResolveFailed);
+    }
+    for addr in &addrs {
         if is_blocked_destination_ip(addr.ip(), allow_private) {
             return Err(EgressError::HostNotAllowed);
         }
     }
-    if !any {
-        return Err(EgressError::ResolveFailed);
-    }
-    Ok(())
+    Ok(Some((host, addrs[0])))
 }
 
 fn validate_destination_url_with(raw: &str, allow_private: bool) -> Result<(), EgressError> {
@@ -148,6 +159,14 @@ fn is_blocked_destination_ip(ip: IpAddr, allow_private: bool) -> bool {
                 return !allow_private;
             }
             let segments = v6.segments();
+            // multicast ff00::/8
+            if (segments[0] & 0xff00) == 0xff00 {
+                return true;
+            }
+            // documentation 2001:db8::/32
+            if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+                return true;
+            }
             // link-local fe80::/10 — always blocked (metadata)
             if (segments[0] & 0xffc0) == 0xfe80 {
                 return true;
@@ -196,5 +215,22 @@ mod tests {
         assert!(validate_destination_url_with("http://10.0.0.5/hook", true).is_ok());
         assert!(validate_destination_url_with("http://169.254.169.254/latest", true).is_err());
         assert!(validate_destination_url_with("http://metadata.google.internal/", true).is_err());
+    }
+
+    #[tokio::test]
+    async fn pin_rejects_loopback_ip_and_localhost_dns() {
+        assert!(pin_destination_addr("http://127.0.0.1/hook").await.is_err());
+        assert!(pin_destination_addr("http://169.254.169.254/latest")
+            .await
+            .is_err());
+        assert!(pin_destination_addr("http://localhost/hook").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pin_public_ip_literal() {
+        let pin = pin_destination_addr("http://1.1.1.1/hook").await.unwrap();
+        let (host, addr) = pin.expect("ip literal should pin");
+        assert_eq!(host, "1.1.1.1");
+        assert_eq!(addr.ip().to_string(), "1.1.1.1");
     }
 }

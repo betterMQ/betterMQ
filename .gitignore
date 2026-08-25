@@ -23,6 +23,8 @@ Thumbs.db
 node_modules/
 .next/
 dist/
+!engine/panel/dist/
+!engine/panel/dist/**
 .turbo/
 
 # Logs

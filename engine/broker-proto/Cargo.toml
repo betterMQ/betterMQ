@@ -12,3 +12,11 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 bincode = { workspace = true }
 crc32fast = { workspace = true }
+siphasher = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "encode"
+harness = false

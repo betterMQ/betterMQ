@@ -8,9 +8,9 @@
 #   powershell -ExecutionPolicy Bypass -c "irm https://bettermq.com/install.ps1 | iex"
 #
 # Detects your OS + arch, downloads the matching binary from the
-# betterMQ/betterMQ GitHub Releases, verifies sha256 (when checksums.txt is
-# published for the release), installs to ~/.bettermq/bin and links it into
-# ~/.local/bin/bettermq.
+# betterMQ/betterMQ GitHub Releases, verifies sha256 against checksums.txt
+# (required — install fails if the file or sha256 tool is missing), installs
+# to ~/.bettermq/bin and links it into ~/.local/bin/bettermq.
 #
 # Optional env vars / args:
 #   $1                    — "latest" (default) or explicit version like "0.3.1"
@@ -192,17 +192,14 @@ zip_path="$tmp/$asset.zip"
 info "Downloading $asset.zip…"
 dl "$asset_base/$asset.zip" "$zip_path" || die "download failed: $asset_base/$asset.zip"
 
-# checksums.txt is published from v0.4+ — verify when available.
-if dl "$asset_base/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
-  expected=$(grep "  $asset.zip\$" "$tmp/checksums.txt" | awk '{print $1}' || true)
-  actual=$(sha256 "$zip_path")
-  if [ -n "$expected" ] && [ -n "$actual" ]; then
-    [ "$expected" = "$actual" ] || die "checksum mismatch for $asset.zip (expected $expected, got $actual)"
-    ok "Verified sha256"
-  fi
-else
-  info "No checksums.txt for $tag — skipping verification."
-fi
+# checksums.txt is required — fail closed if missing or sha256 is unavailable.
+actual=$(sha256 "$zip_path")
+[ -n "$actual" ] || die "sha256sum or shasum is required to verify the download"
+dl "$asset_base/checksums.txt" "$tmp/checksums.txt" || die "checksums.txt missing for $tag ($asset_base/checksums.txt)"
+expected=$(grep "  $asset.zip\$" "$tmp/checksums.txt" | awk '{print $1}' || true)
+[ -n "$expected" ] || die "no checksum entry for $asset.zip in checksums.txt"
+[ "$expected" = "$actual" ] || die "checksum mismatch for $asset.zip (expected $expected, got $actual)"
+ok "Verified sha256"
 
 if command -v unzip >/dev/null 2>&1; then
   unzip -oq "$zip_path" -d "$tmp"

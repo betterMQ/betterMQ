@@ -1,7 +1,6 @@
 //! Atomic JSON file I/O with corruption recovery (.tmp / .bak fallbacks).
 
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::{info, warn};
@@ -169,39 +168,18 @@ where
     })
 }
 
-/// Write `bytes` atomically: temp file → fsync → rotate `.bak` → rename.
+/// Write `bytes` atomically: rotate `.bak` then temp → fsync → rename.
 pub fn persist_json_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let tmp = temp_path(path);
     let bak = backup_path(path);
-
-    {
-        let mut file = File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-
     if path.exists() {
         let _ = fs::copy(path, &bak);
     }
 
-    if cfg!(windows) && path.exists() {
-        let _ = fs::remove_file(path);
-    }
-
-    fs::rename(&tmp, path)?;
-
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
-
-    Ok(())
+    broker_storage::atomic_write_file(path, bytes)
 }
 
 #[cfg(test)]

@@ -147,10 +147,26 @@ impl SlateMetadataStore {
     ) -> Result<(), SlateIndexError> {
         let key = Self::dispatch_key(tenant_id, subscription_id, partition);
         let value = next_offset.to_le_bytes().to_vec();
+        let tenant_id = tenant_id.to_string();
+        let subscription_id = subscription_id.to_string();
         let db = Arc::clone(&self.db);
         block_on_slate(async move {
+            let current = db
+                .get(&key)
+                .await
+                .map_err(|e| SlateIndexError::Slate(e.to_string()))?
+                .and_then(|bytes| bytes.as_ref().try_into().ok().map(u64::from_le_bytes))
+                .unwrap_or(0);
             let mut batch = WriteBatch::new();
             batch.put_bytes(Bytes::from(key), Bytes::from(value));
+            for offset in current..next_offset {
+                batch.delete(Self::complete_key(
+                    &tenant_id,
+                    &subscription_id,
+                    partition,
+                    offset,
+                ));
+            }
             let opts = Self::durable_opts();
             db.write_with_options(batch, &opts)
                 .await
@@ -160,5 +176,51 @@ impl SlateMetadataStore {
                 .map_err(|e| SlateIndexError::Slate(e.to_string()))?;
             Ok(())
         })
+    }
+
+    fn complete_key(
+        tenant_id: &str,
+        subscription_id: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Vec<u8> {
+        format!("dcomp:{tenant_id}:{subscription_id}:p{partition}:{offset}").into_bytes()
+    }
+
+    pub fn mark_dispatch_complete(
+        &self,
+        tenant_id: &str,
+        subscription_id: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Result<(), SlateIndexError> {
+        let key = Self::complete_key(tenant_id, subscription_id, partition, offset);
+        let db = Arc::clone(&self.db);
+        block_on_slate(async move {
+            let mut batch = WriteBatch::new();
+            batch.put_bytes(Bytes::from(key), Bytes::from_static(&[1u8]));
+            let opts = Self::durable_opts();
+            db.write_with_options(batch, &opts)
+                .await
+                .map_err(|e| SlateIndexError::Slate(e.to_string()))?;
+            Ok(())
+        })
+    }
+
+    pub fn is_dispatch_complete(
+        &self,
+        tenant_id: &str,
+        subscription_id: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Result<bool, SlateIndexError> {
+        let key = Self::complete_key(tenant_id, subscription_id, partition, offset);
+        let db = Arc::clone(&self.db);
+        let bytes = block_on_slate(async move {
+            db.get(&key)
+                .await
+                .map_err(|e| SlateIndexError::Slate(e.to_string()))
+        })?;
+        Ok(bytes.is_some())
     }
 }

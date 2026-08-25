@@ -7,6 +7,7 @@ description = "Payload blob store (inline + S3/MinIO) — CP3b"
 
 [dependencies]
 async-trait = "0.1"
+broker-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -17,10 +18,11 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true, optional = true }
 object_store = { version = "0.12", optional = true, features = ["aws"] }
+futures = { version = "0.3", optional = true }
 
 [features]
 default = []
-s3 = ["dep:object_store", "dep:tokio"]
+s3 = ["dep:object_store", "dep:tokio", "dep:futures"]
 
 [dev-dependencies]
 tempfile = "3"

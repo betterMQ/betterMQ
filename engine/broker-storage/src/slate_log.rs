@@ -66,8 +66,14 @@ const META_LEADER_GEN: &[u8] = b"meta/leader_generation";
 
 /// Stable object-store prefix shared by every broker in a cluster (not per-node `data_dir`).
 #[cfg(feature = "slate")]
-pub fn slate_db_path(tenant_id: &str, topic: &str, partition: u32) -> String {
-    format!("bettermq/{tenant_id}/topics/{topic}/p{partition}")
+pub fn slate_db_path(
+    tenant_id: &str,
+    topic: &str,
+    partition: u32,
+) -> Result<String, broker_proto::PathSegmentError> {
+    let tenant = broker_proto::sanitize_path_segment(tenant_id)?;
+    let topic = broker_proto::sanitize_path_segment(topic)?;
+    Ok(format!("bettermq/{tenant}/topics/{topic}/p{partition}"))
 }
 
 #[cfg(feature = "slate")]
@@ -152,13 +158,15 @@ impl SlatePartitionLog {
         Ok(next)
     }
 
-    /// Reject stale leaders; stamp a higher generation into the next durable batch.
+    /// Reject stale leaders against the durable generation, not only the in-memory copy.
     pub fn require_fence(&mut self, generation: u64) -> Result<(), LogError> {
-        if generation < self.leader_generation {
-            return Err(LogError::Slate(format!(
-                "stale leader fence: our generation {generation} < stored {}",
-                self.leader_generation
-            )));
+        let stored = Self::read_leader_generation(Arc::clone(&self.db))?;
+        self.leader_generation = stored;
+        if generation < stored {
+            return Err(LogError::StaleFence {
+                ours: generation,
+                stored,
+            });
         }
         Ok(())
     }
@@ -205,9 +213,23 @@ impl SlatePartitionLog {
         let frame_bytes = Bytes::from(frame.clone());
         let next_bytes = next.to_be_bytes();
         let stamp_gen = fence_generation.filter(|g| *g > self.leader_generation);
+        let fence_check = fence_generation;
         let gen_bytes = stamp_gen.map(|g| g.to_be_bytes());
 
         block_on_slate(async move {
+            if let Some(gen) = fence_check {
+                let stored = match db.get(META_LEADER_GEN).await.map_err(slate_err)? {
+                    Some(bytes) if bytes.len() >= 8 => {
+                        let mut buf = [0u8; 8];
+                        buf.copy_from_slice(&bytes[..8]);
+                        u64::from_be_bytes(buf)
+                    }
+                    _ => 0u64,
+                };
+                if gen < stored {
+                    return Err(LogError::StaleFence { ours: gen, stored });
+                }
+            }
             let mut batch = WriteBatch::new();
             batch.put_bytes(Bytes::from(key), frame_bytes);
             batch.put_bytes(

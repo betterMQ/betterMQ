@@ -48,6 +48,7 @@ async fn publish_triggers_webhook_with_signature() {
             topic: "hooks".into(),
             url: format!("{}/hook", mock.uri()),
             secret: "whsec_test".into(),
+            parallelism: None,
             default_max_retries: None,
             retry_backoff: None,
         })
@@ -78,6 +79,10 @@ async fn publish_triggers_webhook_with_signature() {
             sign: Some(true),
             request: None,
         })
+        .unwrap();
+    broker
+        .wait_committed(&resp.topic, resp.partition.unwrap(), resp.offset.unwrap())
+        .await
         .unwrap();
 
     dispatch.enqueue(broker_dispatch::DeliveryJob::live(
