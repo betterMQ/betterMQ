@@ -3,7 +3,7 @@
   "info": {
     "title": "BetterMQ API",
     "description": "HTTP message broker — publish, queues, enqueue, flow control, cron, and DLQ. Authenticate with a panel-generated `sk_local_…` Bearer token.",
-    "version": "0.6.0",
+    "version": "0.6.1",
     "license": {
       "name": "MIT OR Apache-2.0"
     }
@@ -2255,7 +2255,9 @@
     },
     "/v1/ops/aggregate": {
       "get": {
-        "tags": ["Ops"],
+        "tags": [
+          "Ops"
+        ],
         "operationId": "aggregateOpsStatus",
         "summary": "Aggregate DLQ/delayed/metrics/fleet across local + peer brokers",
         "responses": {
@@ -2263,7 +2265,9 @@
             "description": "OK",
             "content": {
               "application/json": {
-                "schema": { "type": "object" }
+                "schema": {
+                  "type": "object"
+                }
               }
             }
           }
