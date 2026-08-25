@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY engine ./engine
+COPY tools ./tools
 RUN cargo build --release -p broker-server
 
 FROM debian:bookworm-slim

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: Semver bump from the latest v* tag. Cargo.toml and OpenAPI on main must already match that version.
+        description: Semver bump (from latest v* tag, or 0.1.0 if none)
         type: choice
         options:
           - patch
@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
   packages: write
 
 env:
@@ -22,21 +23,19 @@ env:
   IMAGE_NAME: bettermq
 
 jobs:
-  # Version bumps are merged to main by hand. This job only tags HEAD when
-  # Cargo.toml and OpenAPI already match the next version; it never creates a
-  # chore/release-* branch or pull request.
-  prepare:
+  bump:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.prepare.outputs.version }}
-      tag: ${{ steps.prepare.outputs.tag }}
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      pr_number: ${{ steps.open_pr.outputs.pr_number }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PAT || github.token }}
 
-      - id: prepare
+      - id: bump
         shell: bash
         run: |
           set -euo pipefail
@@ -56,49 +55,92 @@ jobs:
           esac
           VERSION="${MAJOR}.${MINOR}.${PATCH}"
           TAG="v${VERSION}"
-          echo "Next release from ${LATEST:-<none>} → ${TAG} (${BUMP})"
-
-          cargo_version="$(awk '
-            /^\[workspace.package\]/ { in_pkg = 1; next }
-            /^\[/ { in_pkg = 0 }
-            in_pkg && /^version = / {
-              gsub(/"/, "", $3)
-              print $3
-              exit
-            }
-          ' Cargo.toml)"
-          openapi_version="$(jq -r '.info.version' engine/broker-server/openapi/bettermq.openapi.json)"
-
-          if [[ "$cargo_version" != "$VERSION" || "$openapi_version" != "$VERSION" ]]; then
-            echo "::error::main is Cargo.toml=${cargo_version} OpenAPI=${openapi_version}, but this ${BUMP} release expects ${VERSION}."
-            echo "Bump both files on main, merge, then re-run Release."
-            exit 1
-          fi
-
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Bumping ${LATEST:-<none>} → ${TAG} (${BUMP})"
 
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            existing="$(git rev-parse "${TAG}^{commit}")"
-            head="$(git rev-parse HEAD)"
-            if [[ "$existing" != "$head" ]]; then
-              echo "::error::Tag ${TAG} already exists at ${existing}, but HEAD is ${head}."
-              echo "Do not move an existing release tag. Use a new bump on main."
-              exit 1
-            fi
-            echo "Tag ${TAG} already points at HEAD"
-            echo "push_tag=false" >> "$GITHUB_OUTPUT"
+      - name: Set workspace version
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          sed -i '/^\[workspace\.package\]/,/^\[/{ s/^version = ".*"/version = "'"${VERSION}"'"/; }' Cargo.toml
+          grep -A2 '^\[workspace.package\]' Cargo.toml
+
+      - name: Sync OpenAPI info.version
+        run: |
+          jq --arg v "${{ steps.bump.outputs.version }}" '.info.version = $v' \
+            engine/broker-server/openapi/bettermq.openapi.json > /tmp/openapi.json
+          mv /tmp/openapi.json engine/broker-server/openapi/bettermq.openapi.json
+
+      - name: Commit version bump and tag
+        id: commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TAG="${{ steps.bump.outputs.tag }}"
+          git add Cargo.toml engine/broker-server/openapi/bettermq.openapi.json
+          if git diff --staged --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to commit — main already has ${{ steps.bump.outputs.version }}"
           else
-            git tag "$TAG"
-            echo "push_tag=true" >> "$GITHUB_OUTPUT"
+            git commit -m "chore(release): ${TAG}"
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+          git tag -f "${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # main is protected — never push HEAD:main; use release branch + PR (or tag-only).
+      - name: Push release branch and tag
+        id: release_branch
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.commit.outputs.tag }}"
+          if [[ "${{ steps.commit.outputs.committed }}" == "true" ]]; then
+            BRANCH="chore/release-${TAG}"
+            git checkout -b "${BRANCH}"
+            git push origin "${BRANCH}" "${TAG}"
+            echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          else
+            git push origin "${TAG}"
+            echo "branch=" >> "$GITHUB_OUTPUT"
+            echo "Pushed tag ${TAG} only (version already on main)"
           fi
 
-      - name: Push tag
-        if: steps.prepare.outputs.push_tag == 'true'
-        run: git push origin "${{ steps.prepare.outputs.tag }}"
+      - name: Open pull request (merge version bump to main)
+        id: open_pr
+        if: steps.release_branch.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.bump.outputs.tag }}"
+          BRANCH="${{ steps.release_branch.outputs.branch }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY="Automated version bump from the [Release workflow](${RUN_URL}).
+
+          - Bumps Cargo.toml and OpenAPI info.version to ${{ steps.bump.outputs.version }}
+          - Tag ${TAG} is pushed; build + GitHub release follow in this workflow
+          - **Merge this PR** so main matches the release tag"
+          EXISTING="$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "${EXISTING}" ]]; then
+            echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
+            echo "PR already open: #${EXISTING}"
+            exit 0
+          fi
+          if ! gh pr create --base main --head "${BRANCH}" --title "chore(release): ${TAG}" --body "${BODY}"; then
+            echo "::warning::Could not auto-create PR."
+            echo "Enable Settings → Actions → Allow GitHub Actions to create pull requests,"
+            echo "or open manually: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${BRANCH}?expand=1"
+            exit 0
+          fi
+          PR="$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')"
+          echo "pr_number=${PR}" >> "$GITHUB_OUTPUT"
+          echo "Open PR #${PR} — merge when ready: ${RUN_URL}"
 
   build:
-    needs: prepare
+    needs: bump
     strategy:
       fail-fast: false
       matrix:
@@ -120,13 +162,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.bump.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin to rust-toolchain.toml (1.89.0). `@stable` installs the target on a
+      # different toolchain, then rustup overrides back to 1.89.0 without it.
+      - uses: dtolnay/rust-toolchain@1.89.0
         with:
           targets: ${{ matrix.target }}
+
+      - name: Add target to the repo-pinned toolchain
+        run: rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
 
@@ -149,7 +196,7 @@ jobs:
           path: dist/${{ matrix.artifact }}
 
   docker:
-    needs: prepare
+    needs: bump
     strategy:
       fail-fast: false
       matrix:
@@ -165,7 +212,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.bump.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -212,7 +259,7 @@ jobs:
           retention-days: 1
 
   docker-merge:
-    needs: [prepare, docker]
+    needs: [bump, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -243,8 +290,8 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=raw,value=${{ needs.prepare.outputs.version }}
-            type=raw,value=v${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.bump.outputs.version }}
+            type=raw,value=v${{ needs.bump.outputs.version }}
             type=raw,value=latest
 
       - name: Create multi-arch manifest and push
@@ -257,10 +304,10 @@ jobs:
       - name: Inspect image
         run: |
           docker buildx imagetools inspect \
-            "${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.version }}"
+            "${{ steps.image.outputs.name }}:${{ needs.bump.outputs.version }}"
 
   publish:
-    needs: [prepare, build]
+    needs: [bump, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -283,8 +330,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: BetterMQ ${{ needs.prepare.outputs.version }}
+          tag_name: ${{ needs.bump.outputs.tag }}
+          name: BetterMQ ${{ needs.bump.outputs.version }}
           generate_release_notes: true
           files: |
             dist/*.zip
