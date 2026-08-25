@@ -321,7 +321,7 @@ open http://localhost:8080/panel/
 | Image | Notes |
 |-------|--------|
 | `ghcr.io/bettermq/bettermq:latest` | Latest release |
-| `ghcr.io/bettermq/bettermq:0.4.0` | Pin a version |
+| `ghcr.io/bettermq/bettermq:0.6.0` | Pin a version |
 
 1. Set a **panel password** and copy your API token.
 2. **Infrastructure** — storage (local or Slate + S3), optional cluster.

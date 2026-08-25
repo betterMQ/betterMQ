@@ -3,7 +3,7 @@
   "info": {
     "title": "BetterMQ API",
     "description": "HTTP message broker — publish, queues, enqueue, flow control, cron, and DLQ. Authenticate with a panel-generated `sk_local_…` Bearer token.",
-    "version": "0.4.0",
+    "version": "0.6.0",
     "license": {
       "name": "MIT OR Apache-2.0"
     }
