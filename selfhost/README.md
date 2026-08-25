@@ -367,7 +367,9 @@ bettermq serve --listen 0.0.0.0:8080 --panel-listen 127.0.0.1:8090
 BETTERMQ_PANEL_LISTEN=127.0.0.1:8090 bettermq serve
 ```
 
-Then open **http://127.0.0.1:8090/panel/**. The API remains at `http://<host>:8080`.
+Then open **http://127.0.0.1:8090/panel/**. That panel port also serves the full `/v1` API and `/healthz` (same process) so the UI can talk to itself. The public API remains at `http://<host>:8080` without `/panel` or `/docs`. Replication stays on `--internal-listen` (default: same as `--listen` unless set).
+
+Set `BETTERMQ_NODE_PUBLIC_URL` to the public API URL so cluster join advertises that host, not the panel port.
 
 Useful when you expose the API publicly but keep the panel on localhost / VPN only. Day-to-day ops use the seed (or standalone `bettermq panel`).
 

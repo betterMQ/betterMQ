@@ -222,3 +222,99 @@ async fn standalone_panel_has_no_infra_join() {
         attach.status()
     );
 }
+
+#[tokio::test]
+async fn split_panel_listen_serves_v1_on_panel_and_hides_panel_from_public() {
+    let data = tempfile::tempdir().unwrap();
+    let public = free_addr();
+    let panel = free_addr();
+    let internal = free_addr();
+    let child = spawn_serve(
+        &[
+            "serve",
+            "--listen",
+            &public.to_string(),
+            "--panel-listen",
+            &panel.to_string(),
+            "--internal-listen",
+            &internal.to_string(),
+            "--data-dir",
+            data.path().to_str().unwrap(),
+        ],
+        data.path(),
+    );
+    let _guard = ChildGuard(child);
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let public_base = format!("http://{public}");
+    let panel_base = format!("http://{panel}");
+    assert!(wait_health(&client, &format!("{public_base}/healthz")).await);
+    assert!(wait_health(&client, &format!("{panel_base}/healthz")).await);
+
+    let auth_public = client
+        .get(format!("{public_base}/v1/auth/config"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        auth_public.status().is_success(),
+        "{}",
+        auth_public.status()
+    );
+
+    let auth_panel = client
+        .get(format!("{panel_base}/v1/auth/config"))
+        .send()
+        .await
+        .unwrap();
+    assert!(auth_panel.status().is_success(), "{}", auth_panel.status());
+
+    let panel_on_public = client
+        .get(format!("{public_base}/panel/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        panel_on_public.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "public listener must not serve /panel/"
+    );
+
+    let panel_ui = client
+        .get(format!("{panel_base}/panel/"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        panel_ui.status().is_success() || panel_ui.status().is_redirection(),
+        "panel listener should serve /panel/: {}",
+        panel_ui.status()
+    );
+
+    let docs_public = client
+        .get(format!("{public_base}/docs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(docs_public.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let docs_panel = client
+        .get(format!("{panel_base}/docs"))
+        .send()
+        .await
+        .unwrap();
+    assert!(docs_panel.status().is_success(), "{}", docs_panel.status());
+
+    let internal_on_public = client
+        .get(format!("{public_base}/internal/v1/cluster"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        internal_on_public.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "public listener must not serve /internal/v1"
+    );
+}
