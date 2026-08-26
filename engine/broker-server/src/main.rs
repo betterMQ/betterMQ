@@ -1,9 +1,10 @@
 use anyhow::Context;
 use axum::{response::Redirect, routing::get};
 use broker_api::{
-    admin_router, begin_shutdown, enqueue_dispatch_after_publish, gateway_only_router,
-    internal_router, open_setup_window, public_router, publish_with_cluster, router,
-    spawn_cluster_catalog_sync, AdminState, AppState, CatalogTombstones, Cluster, GatewayOnlyState,
+    admin_router, begin_shutdown, data_plane_router_no_spawn, enqueue_dispatch_after_publish,
+    gateway_only_router, internal_router, open_setup_window, public_router, publish_with_cluster,
+    router, spawn_cluster_catalog_sync, AdminState, AppState, CatalogTombstones, Cluster,
+    GatewayOnlyState,
 };
 use broker_cli::{
     Cli, ClusterCommands, ClusterInitArgs, ClusterJoinArgs, Commands, ConfigCommands,
@@ -778,8 +779,12 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             .layer(cors.clone())
             .layer(TraceLayer::new_for_http())
     } else {
-        public_router((*app_state).clone())
-            .merge(docs::router())
+        // Docs/OpenAPI stay on the admin/panel listener when it is split off.
+        let mut public = public_router((*app_state).clone());
+        if settings.listeners.admin == settings.listeners.public {
+            public = public.merge(docs::router());
+        }
+        public
             .layer(axum::middleware::from_fn(security::api_security_headers))
             .layer(cors.clone())
             .layer(TraceLayer::new_for_http())
@@ -788,6 +793,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listeners.public)
         .await
         .with_context(|| format!("bind {}", settings.listeners.public))?;
+    info!(addr = %settings.listeners.public, "public listen");
 
     if !collapsed {
         let internal_app = internal_router((*app_state).clone())
@@ -805,8 +811,12 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             let admin_listener = tokio::net::TcpListener::bind(settings.listeners.admin)
                 .await
                 .with_context(|| format!("bind admin {}", settings.listeners.admin))?;
-            info!(addr = %settings.listeners.admin, "admin listen");
-            let admin_app = panel_and_admin;
+            info!(addr = %settings.listeners.admin, "panel+admin listen");
+            let data_plane = data_plane_router_no_spawn((*app_state).clone())
+                .layer(axum::middleware::from_fn(security::api_security_headers))
+                .layer(cors.clone())
+                .layer(TraceLayer::new_for_http());
+            let admin_app = panel_and_admin.merge(data_plane);
             bg_tasks.push(tokio::spawn(async move {
                 let _ = axum::serve(admin_listener, admin_app).await;
             }));
@@ -817,8 +827,13 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("bind panel {}", panel_addr))?;
         info!(%panel_addr, "panel+admin listen");
+        let data_plane = data_plane_router_no_spawn((*app_state).clone())
+            .layer(axum::middleware::from_fn(security::api_security_headers))
+            .layer(cors.clone())
+            .layer(TraceLayer::new_for_http());
+        let panel_app = panel_and_admin.merge(data_plane);
         bg_tasks.push(tokio::spawn(async move {
-            let _ = axum::serve(panel_listener, panel_and_admin).await;
+            let _ = axum::serve(panel_listener, panel_app).await;
         }));
     }
 

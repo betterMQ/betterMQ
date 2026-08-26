@@ -110,13 +110,17 @@ pub struct HealthResponse {
     pub protocol: u32,
 }
 
-/// Builds the data-plane HTTP router.
-pub fn router(state: AppState) -> Router {
-    let dispatch_fleet = state.dispatch_fleet;
+fn into_shared(state: AppState, spawn: bool) -> Arc<AppState> {
     let shared = Arc::new(state);
-    bettermq::spawn_fanout_replay(shared.clone());
-    bettermq::spawn_dlq_retention(shared.clone());
+    if spawn {
+        bettermq::spawn_fanout_replay(shared.clone());
+        bettermq::spawn_dlq_retention(shared.clone());
+    }
+    shared
+}
 
+fn data_plane_routes(shared: Arc<AppState>) -> Router<Arc<AppState>> {
+    let dispatch_fleet = shared.dispatch_fleet;
     let protected = if dispatch_fleet {
         Router::new()
     } else {
@@ -160,31 +164,55 @@ pub fn router(state: AppState) -> Router {
             ))
     };
 
-    let internal = internal_cluster_routes();
-
-    let public = Router::new()
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(ops::readyz))
         .route("/metrics", get(ops::metrics))
         .route("/metrics/prometheus", get(ops::metrics_prometheus))
-        .merge(internal)
         .merge(local_auth::routes())
-        .merge(infra::public_infra_routes());
-
-    let app = public
+        .merge(infra::public_infra_routes())
         .merge(protected)
-        .layer(DefaultBodyLimit::max(http_body_limit_bytes()));
-    app.with_state(shared)
 }
 
-/// Public data-plane listener. Combined with internal on collapsed binds.
+fn finish_router(routes: Router<Arc<AppState>>, shared: Arc<AppState>) -> Router {
+    routes
+        .layer(DefaultBodyLimit::max(http_body_limit_bytes()))
+        .with_state(shared)
+}
+
+/// Data-plane + `/internal/v1` (single collapsed listener).
+pub fn router(state: AppState) -> Router {
+    let shared = into_shared(state, true);
+    finish_router(
+        data_plane_routes(shared.clone()).merge(internal_cluster_routes()),
+        shared,
+    )
+}
+
+/// Public ingest/API (`/v1`, `/healthz`, metrics). Does not include `/internal/v1`.
+pub fn data_plane_router(state: AppState) -> Router {
+    data_plane_router_spawn(state, true)
+}
+
+/// Same as [`data_plane_router`] without starting fan-out/DLQ tasks (already spawned).
+pub fn data_plane_router_no_spawn(state: AppState) -> Router {
+    data_plane_router_spawn(state, false)
+}
+
+fn data_plane_router_spawn(state: AppState, spawn: bool) -> Router {
+    let shared = into_shared(state, spawn);
+    finish_router(data_plane_routes(shared.clone()), shared)
+}
+
+/// Public data-plane listener when panel/internal are split off.
 pub fn public_router(state: AppState) -> Router {
-    router(state)
+    data_plane_router(state)
 }
 
-/// Internal cluster/replication/controller listener.
+/// Replication/lease/controller listener (`/internal/v1` only).
 pub fn internal_router(state: AppState) -> Router {
-    router(state)
+    let shared = into_shared(state, false);
+    finish_router(internal_cluster_routes(), shared)
 }
 
 fn internal_cluster_routes() -> Router<Arc<AppState>> {
