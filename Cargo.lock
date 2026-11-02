@@ -263,7 +263,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bettermq-loadgen"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "bettermq-sink"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "broker-api"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "axum",
  "base64",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "broker-cli"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "broker-api",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "broker-config"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "broker-proto",
  "broker-raft-meta",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "broker-dispatch"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "broker-partition",
  "broker-proto",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "broker-local-auth"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "argon2",
  "hex",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "broker-partition"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "base64",
  "broker-payload",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "broker-payload"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "broker-proto",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "broker-proto"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "bincode-next",
  "crc32fast",
@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "broker-raft-meta"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "axum",
  "broker-proto",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "broker-replication"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "base64",
  "broker-proto",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "broker-schedule"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "broker-partition",
  "broker-proto",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "broker-server"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "broker-storage"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "bincode-next",
  "broker-proto",
@@ -3226,9 +3226,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.41"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",
@@ -3262,9 +3262,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
