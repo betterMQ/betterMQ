@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install libclang (bindgen for librocksdb-sys)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
@@ -58,6 +61,9 @@ jobs:
     needs: [rust, selfhost-compose-validate]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install libclang (bindgen for librocksdb-sys)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - name: SSRF + lease unit gates
@@ -80,6 +86,9 @@ jobs:
     needs: [rust]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install libclang (bindgen for librocksdb-sys)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - name: document launch gate

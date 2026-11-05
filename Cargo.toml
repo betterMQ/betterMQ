@@ -40,7 +40,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 bincode-next = { version = "2.1", features = ["serde"] }
 crc32fast = "1.4"
-rocksdb = { version = "0.22", default-features = false }
+rocksdb = { version = "0.25", default-features = false }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 parking_lot = "0.12"
 base64 = "0.22"

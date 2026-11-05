@@ -1,0 +1,1 @@
+import{A as e,N as t,St as n,f as r,g as i,st as a,t as o}from"./utils-CBpL9zCG.js";var s=i({__name:`CardDescription`,props:{class:{type:[Boolean,null,String,Object,Array]}},setup(i){let s=i;return(i,c)=>(e(),r(`div`,{"data-slot":`card-description`,class:n(a(o)(`text-muted-foreground text-sm`,s.class))},[t(i.$slots,`default`)],2))}});export{s as t};
